@@ -9,6 +9,7 @@
     <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
     <EnableDefaultPageItems>false</EnableDefaultPageItems>
     <StartupObject>WindowSwitcherWpf.App</StartupObject>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,8 +19,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 便携工具: 关闭/卸载脚本随 exe 一起发布 -->
+    <None Include="Tools\关闭应用.bat" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Tools\卸载.bat" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Tools\启动窗口切换器.bat" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

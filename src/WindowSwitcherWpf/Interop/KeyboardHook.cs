@@ -17,6 +17,10 @@ public sealed class KeyboardHook : IDisposable
 {
     public event Action? OverlayRequested;
     public event Action<bool>? OverlayAdvance;
+    public event Action<int>? OverlayArrow;
+    /// <summary>Alt+0..9 (main row + numpad) while the overlay is open:
+    /// quick-jump to the slot with that badge (Alt+数字 直达标签).</summary>
+    public event Action<int>? OverlayDigit;
     public event Action? OverlayCommit;
     public event Action? OverlayCancel;
     public event Action? EscapePressed;
@@ -108,8 +112,18 @@ public sealed class KeyboardHook : IDisposable
             {
                 if (vk == 0x26 || vk == 0x28 || vk == 0x25 || vk == 0x27)
                 {
-                    var reverse = vk == 0x26 || vk == 0x25;
-                    Fire(() => OverlayAdvance?.Invoke(reverse));
+                    // 2D grid navigation: the overlay maps the vk to a flat
+                    // card index (left/right = ±1, up/down = ±columns).
+                    var vkArrow = (int)vk;
+                    Fire(() => OverlayArrow?.Invoke(vkArrow));
+                    return new IntPtr(1);
+                }
+                // Alt+数字: main row 0-9 and numpad 0-9 address slot badges.
+                if (vk is >= 0x30 and <= 0x39 or >= 0x60 and <= 0x69)
+                {
+                    var digit = (int)(vk >= 0x60 ? vk - 0x60 : vk - 0x30);
+                    Log.Info("KeyboardHook", $"alt+digit {digit}");
+                    Fire(() => OverlayDigit?.Invoke(digit));
                     return new IntPtr(1);
                 }
             }

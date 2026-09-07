@@ -53,12 +53,46 @@ public partial class SwitcherOverlay : Window
 
     public ObservableCollection<OverlayWindow> AllWindows => _windows;
 
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        ApplyAcrylic();
+    }
+
+    // Native Alt+Tab look: Win11 system acrylic backdrop + rounded window
+    // corners. DwmExtendFrameIntoClientArea makes the DWM backdrop
+    // (DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW — the exact
+    // backdrop native Alt+Tab uses) show through the transparent WPF
+    // client area.
+    private void ApplyAcrylic()
+    {
+        try
+        {
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            var round = NativeMethods.DWMWCP_ROUND;
+            NativeMethods.DwmSetWindowAttribute(
+                hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
+            var backdrop = NativeMethods.DWMSBT_TRANSIENTWINDOW;
+            var hr = NativeMethods.DwmSetWindowAttribute(
+                hwnd, NativeMethods.DWMWA_SYSTEMBACKDROP_TYPE, ref backdrop, sizeof(int));
+            var margins = new NativeMethods.MARGINS { cxLeftWidth = -1, cxRightWidth = -1, cyTopHeight = -1, cyBottomHeight = -1 };
+            NativeMethods.DwmExtendFrameIntoClientArea(hwnd, ref margins);
+            WindowSwitcherWpf.Services.Log.Info("Overlay",
+                $"acrylic backdrop hr=0x{hr:X}");
+        }
+        catch (Exception ex)
+        {
+            WindowSwitcherWpf.Services.Log.Exception("Overlay.Acrylic", ex);
+        }
+    }
+
     public void ShowAndFocus()
     {
         try
         {
             _controller.OpenOverlay();
             Rebuild();
+            RefreshHeaderUI();
             try
             {
                 Show();
@@ -71,6 +105,7 @@ public partial class SwitcherOverlay : Window
             }
             _isOpen = true;
             _thumbTimer.Start();
+            CenterOnCursorMonitor();
             // DWM thumbnails are registered after the window is shown and
             // fully laid out (destination rects are client coordinates).
             // Minimized windows render their tiny minimized frame into DWM
@@ -151,52 +186,214 @@ public partial class SwitcherOverlay : Window
         RebuildSelection();
     }
 
-    private void Rebuild()
+    private void Rebuild() => RebuildFromSlots(preserveScroll: false);
+
+    // ---------- Header UI (右上角: 模板 / 智能排序 / 导出) ----------
+
+    private bool _headerBusy; // guards SelectionChanged during programmatic fill
+
+    /// <summary>Fill the template/sort combos from config.json. Keeps the
+    /// previous selection when the lists still contain it.</summary>
+    private void RefreshHeaderUI()
     {
-        _windows.Clear();
-        foreach (var g in _controller.Groups)
+        var cfg = _controller.Config;
+        _headerBusy = true;
+        try
         {
-            for (var i = 0; i < g.Windows.Count; i++)
+            TemplateCombo.Items.Clear();
+            foreach (var t in cfg.Templates) TemplateCombo.Items.Add(t.Name);
+            if (TemplateCombo.Items.Count > 0) TemplateCombo.SelectedIndex = 0;
+
+            SortCombo.Items.Clear();
+            foreach (var m in cfg.SortMethods) SortCombo.Items.Add(m.Name);
+            if (SortCombo.Items.Count > 0) SortCombo.SelectedIndex = -1;
+        }
+        finally
+        {
+            _headerBusy = false;
+        }
+    }
+
+    private void OnTemplateSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (_headerBusy || TemplateCombo.SelectedIndex < 0) return;
+        var name = TemplateCombo.SelectedItem as string;
+        var template = _controller.Config.Templates.Find(t => t.Name == name);
+        if (template is null) return;
+        WindowSwitcherWpf.Services.Log.Info("Overlay", $"template pick '{name}'");
+        _controller.ApplyTemplate(template);
+        RebuildFromSlots(preserveScroll: true);
+    }
+
+    private void OnSortSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (_headerBusy || SortCombo.SelectedIndex < 0) return;
+        ApplySelectedSort();
+    }
+
+    private void OnSortApply(object sender, RoutedEventArgs e)
+    {
+        if (SortCombo.SelectedIndex < 0)
+        {
+            SortCombo.SelectedIndex = 0;
+            return;
+        }
+        ApplySelectedSort();
+    }
+
+    private void ApplySelectedSort()
+    {
+        var name = SortCombo.SelectedItem as string;
+        var method = _controller.Config.SortMethods.Find(m => m.Name == name);
+        if (method is null) return;
+        WindowSwitcherWpf.Services.Log.Info("Overlay", $"smart sort pick '{name}'");
+        _controller.ApplySmartSort(method);
+        RebuildFromSlots(preserveScroll: true);
+    }
+
+    private void OnExportClick(object sender, RoutedEventArgs e)
+    {
+        var name = "导出-" + DateTime.Now.ToString("yyyyMMdd-HHmm");
+        var n = _controller.ExportCurrentAsTemplate(name);
+        RefreshHeaderUI();
+        // Point the combo at what we just exported so re-applying is easy.
+        var idx = -1;
+        for (var i = 0; i < TemplateCombo.Items.Count; i++)
+            if ((string)TemplateCombo.Items[i] == name) { idx = i; break; }
+        _headerBusy = true;
+        TemplateCombo.SelectedIndex = idx;
+        _headerBusy = false;
+        WindowSwitcherWpf.Services.Log.Info("Overlay", $"export '{name}' slots={n}");
+    }
+
+    /// <summary>Alt+数字 quick jump: select the slot with that badge and
+    /// activate it immediately (快速打开这个标签).</summary>
+    public void SelectSlotAndCommit(int digit)
+    {
+        if (!_isOpen) return;
+        _controller.SelectByDigit(digit);
+        RebuildSelection();
+        Commit();
+    }
+
+    /// <summary>Re-renders the card list from the controller's slot model
+    /// (pins + flow + drag result). Slot 0 = most recent, 1..10 managed,
+    /// -1 unmanaged (no badge). Pin toggles and drags rebuild with the
+    /// scroll position kept so the card doesn't jump under the cursor.</summary>
+    private void RebuildFromSlots(bool preserveScroll)
+    {
+        var offset = preserveScroll ? Scroller.VerticalOffset : 0.0;
+        _windows.Clear();
+        foreach (var sw in _controller.Slotted)
+        {
+            var ow = new OverlayWindow(sw.Entry, sw.Entry.GroupKey, 0)
             {
-                var ow = new OverlayWindow(g.Windows[i], g.Key, i);
-                var cached = LookupCache(ow.Hwnd);
-                if (cached is not null)
-                {
-                    ow.Thumbnail = cached.Thumb;
-                    ow.Icon = cached.Icon;
-                }
-                _windows.Add(ow);
+                SlotBadge = sw.Slot >= 0 ? sw.Slot.ToString() : "",
+                IsPinned = sw.IsPinned,
+            };
+            var cached = LookupCache(ow.Hwnd);
+            if (cached is not null)
+            {
+                ow.Thumbnail = cached.Thumb;
+                ow.Icon = cached.Icon;
             }
+            _windows.Add(ow);
         }
         WindowSwitcherWpf.Services.Log.Info("Overlay", $"rebuild windows={_windows.Count}");
         // Thumbnail capture happens via _thumbTimer, NEVER in Rebuild,
         // otherwise 113 PrintWindow calls block the dispatcher for ~2s
         // and the user releases Alt before the window is shown.
-        if (_windows.Count > 0 && _controller.ActiveGroupIndex >= 0
-            && _controller.ActiveGroupIndex < _controller.Groups.Count)
-        {
-            var key = _controller.Groups[_controller.ActiveGroupIndex].Key;
-            var idx = _controller.ActiveWindowIndex;
-            var first = _windows.FirstOrDefault(w => w.GroupKey == key);
-            if (first is not null) first.IsSelected = true;
-        }
+        RebuildSelection();
         RefreshThumbnails();
+        Dispatcher.BeginInvoke(new Action(LogCardRects), DispatcherPriority.Loaded);
+        if (preserveScroll)
+            Dispatcher.BeginInvoke(() => Scroller.ScrollToVerticalOffset(offset),
+                DispatcherPriority.Loaded);
+    }
+
+    // Ground truth for scripted self-tests: the physical screen rect of
+    // every card, so synthetic clicks can target pins without pixel
+    // archaeology on screenshots.
+    private void LogCardRects()
+    {
+        if (!_isOpen) return;
+        for (var i = 0; i < _windows.Count; i++)
+        {
+            if (WindowsList.ItemContainerGenerator.ContainerFromIndex(i) is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not FrameworkElement card) continue;
+            var tl = card.PointToScreen(new Point(0, 0));
+            var br = card.PointToScreen(new Point(card.ActualWidth, card.ActualHeight));
+            var w = _windows[i];
+            WindowSwitcherWpf.Services.Log.Info("CardRect",
+                $"i={i} slot={w.SlotBadge} pinned={w.IsPinned} " +
+                $"screen=({(int)tl.X},{(int)tl.Y})-({(int)br.X},{(int)br.Y}) '{w.Title}'");
+            if (i > 12) break;
+        }
     }
 
     private void RebuildSelection()
     {
         for (var i = 0; i < _windows.Count; i++)
             _windows[i].IsSelected = false;
-        if (_controller.Groups.Count == 0) return;
-        var group = _controller.Groups[_controller.ActiveGroupIndex];
-        var entry = group.Windows.Count == 0
-            ? null
-            : group.Windows[Math.Min(_controller.ActiveWindowIndex, group.Windows.Count - 1)];
-        if (entry is null) return;
+        if (_controller.Flat.Count == 0) return;
+        var entry = _controller.Flat[Math.Min(_controller.ActiveFlatIndex, _controller.Flat.Count - 1)];
         for (var i = 0; i < _windows.Count; i++)
         {
             if (_windows[i].Hwnd == entry.Hwnd) { _windows[i].IsSelected = true; break; }
         }
+        ScrollSelectionIntoView();
+    }
+
+    // Keep the selected card visible when navigating with keys (native
+    // Alt+Tab behaviour for lists longer than one screen).
+    private void ScrollSelectionIntoView()
+    {
+        var idx = _controller.ActiveFlatIndex;
+        if (WindowsList.ItemContainerGenerator.ContainerFromIndex(idx) is not FrameworkElement el) return;
+        el.UpdateLayout();
+        var point = el.TransformToVisual(Scroller).Transform(new Point(0, 0));
+        var viewportH = Scroller.ViewportHeight;
+        if (point.Y < 0)
+            Scroller.ScrollToVerticalOffset(Scroller.VerticalOffset + point.Y);
+        else if (point.Y + el.ActualHeight > viewportH)
+            Scroller.ScrollToVerticalOffset(Scroller.VerticalOffset + point.Y + el.ActualHeight - viewportH);
+    }
+
+    /// <summary>Arrow-key grid navigation forwarded from the keyboard hook:
+    /// left/right = ±1 card, up/down = ±(cards per row), wrapping.</summary>
+    public void NavigateArrow(int vk)
+    {
+        var n = _controller.Flat.Count;
+        if (n == 0) return;
+        var idx = _controller.ActiveFlatIndex;
+        switch (vk)
+        {
+            case 0x25: idx -= 1; break;   // left
+            case 0x27: idx += 1; break;   // right
+            case 0x26: idx -= Columns(); break; // up
+            case 0x28: idx += Columns(); break; // down
+        }
+        _controller.SelectFlat(idx);
+        RebuildSelection();
+    }
+
+    private int Columns()
+    {
+        // Cards per row = number of containers sharing the minimum top
+        // offset within the wrapped panel.
+        double minTop = double.MaxValue;
+        var tops = new List<double>();
+        for (var i = 0; i < _windows.Count; i++)
+        {
+            if (WindowsList.ItemContainerGenerator.ContainerFromIndex(i) is not FrameworkElement el) continue;
+            var y = el.TransformToVisual(WindowsList).Transform(new Point(0, 0)).Y;
+            tops.Add(y);
+            if (y < minTop) minTop = y;
+        }
+        var cols = 0;
+        foreach (var y in tops)
+            if (Math.Abs(y - minTop) <= 1) cols++;
+        return Math.Max(1, cols);
     }
 
     private void RefreshThumbnails()
@@ -256,12 +453,6 @@ public partial class SwitcherOverlay : Window
     {
         try
         {
-            // Force layout to get the actual size before reading Width/Height.
-            InvalidateMeasure();
-            Measure(new Size(MaxWidth, MaxHeight));
-            Arrange(new Rect(new Point(0, 0), DesiredSize));
-            UpdateLayout();
-
             if (!Interop.NativeMethods.GetCursorPos(out var pt))
             {
                 WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -279,12 +470,31 @@ public partial class SwitcherOverlay : Window
                 return;
             }
             var work = mi.rcWork;
+            // MONITORINFO is physical pixels; convert with this window's DPI
+            // so multi-monitor setups with mixed scaling stay centered.
+            var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(this);
+            var scale = dpi.PixelsPerDip > 0 ? 1.0 / dpi.PixelsPerDip : 1.0;
+            var scaleX = scale;
+            var scaleY = scale;
+            var workW = (work.Right - work.Left) * scaleX;
+            var workH = (work.Bottom - work.Top) * scaleY;
+
+            // Cap the panel to the cursor monitor (MaxWidth/MaxHeight from
+            // the constructor follow the PRIMARY monitor only), then force
+            // layout so the window resizes to the new cap.
+            MaxWidth = workW * 0.94;
+            MaxHeight = workH * 0.92;
+            InvalidateMeasure();
+            Measure(new Size(MaxWidth, MaxHeight));
+            Arrange(new Rect(new Point(0, 0), DesiredSize));
+            UpdateLayout();
+
             var w = ActualWidth > 0 ? ActualWidth : DesiredSize.Width;
             var h = ActualHeight > 0 ? ActualHeight : DesiredSize.Height;
             if (double.IsNaN(w) || double.IsInfinity(w) || w <= 0) w = 800;
             if (double.IsNaN(h) || double.IsInfinity(h) || h <= 0) h = 500;
-            Left = work.Left + (work.Right - work.Left - w) / 2.0;
-            Top = work.Top + (work.Bottom - work.Top - h) / 2.0;
+            Left = work.Left * scaleX + (workW - w) / 2.0;
+            Top = work.Top * scaleY + (workH - h) / 2.0;
             WindowSwitcherWpf.Services.Log.Info("Overlay",
                 $"centered monitor work=({work.Left},{work.Top},{work.Right},{work.Bottom}) " +
                 $"size=({w}x{h}) pos=({Left},{Top})");
@@ -489,6 +699,10 @@ public partial class SwitcherOverlay : Window
                 var el = FindThumbBorder(w);
                 if (el is null || !el.IsLoaded) continue;
                 var tl = el.PointToScreen(new Point(0, 0));
+                // PointToScreen is PHYSICAL px while ActualWidth/Height are
+                // DIPs — convert the size too, or thumbnails render at
+                // 1/scale of the card on >100% monitors.
+                var br = el.PointToScreen(new Point(el.ActualWidth, el.ActualHeight));
                 var left = (int)(tl.X - origin.X);
                 var top = (int)(tl.Y - origin.Y);
                 var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
@@ -500,8 +714,8 @@ public partial class SwitcherOverlay : Window
                     {
                         Left = left,
                         Top = top,
-                        Right = left + (int)el.ActualWidth,
-                        Bottom = top + (int)el.ActualHeight,
+                        Right = left + (int)(br.X - tl.X),
+                        Bottom = top + (int)(br.Y - tl.Y),
                     },
                     fVisible = true,
                     fSourceClientAreaOnly = true,
@@ -525,11 +739,125 @@ public partial class SwitcherOverlay : Window
 
     private void OnCardClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
+        if (sender is FrameworkElement fe0 && fe0.DataContext is OverlayWindow ow0)
+            WindowSwitcherWpf.Services.Log.Info("CardEvent",
+                $"cardclick '{ow0.Title}' dragActive={_dragActive}");
+        var wasDrag = _dragActive;
+        var dragged = _dragItem;
+        EndDrag();
+        if (wasDrag && dragged is not null)
+        {
+            // Drop: insert relative to the card under the cursor, side by
+            // which half of the target the release point is in.
+            if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow target)
+            {
+                var p = e.GetPosition(fe);
+                var before = p.X < fe.ActualWidth / 2;
+                _controller.MoveRelative(dragged.Hwnd, target.Hwnd, before);
+                RebuildFromSlots(preserveScroll: true);
+            }
+            e.Handled = true;
+            return;
+        }
+        if (sender is FrameworkElement fe2 && fe2.DataContext is OverlayWindow ow)
         {
             // The controller's selection must follow the mouse, otherwise
             // Commit() would activate the keyboard-selected window instead.
             if (_controller.SelectByHwnd(ow.Hwnd)) Commit();
+        }
+    }
+
+    // ---------- Drag to reorder (slot model) ----------
+    // Draggable: every card except slot 0 (the special most-recent) and
+    // pinned ones. The drop renumbers unpinned slots, so a window dragged
+    // to the left of a pinned one claims the vacant number.
+    private OverlayWindow? _dragItem;
+    private Point _dragStart;
+    private bool _dragActive;
+
+    private bool CanDrag(OverlayWindow ow) => ow.SlotBadge != "0" && !ow.IsPinned;
+
+    /// <summary>Pin/close presses must not arm the card drag.</summary>
+    private void OnToolDown(object sender, MouseButtonEventArgs e) => e.Handled = true;
+
+    private void OnCardMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe0 && fe0.DataContext is OverlayWindow ow0)
+        {
+            var scr = fe0.PointToScreen(new Point(0, 0));
+            Interop.NativeMethods.GetCursorPos(out var cpt);
+            var cur = new Point(cpt.x, cpt.y);
+            WindowSwitcherWpf.Services.Log.Info("CardEvent",
+                $"down '{ow0.Title}' at={e.GetPosition(fe0)} cardTL={scr} cursorPhys={cur}");
+        }
+        _dragItem = null;
+        _dragActive = false;
+        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow && CanDrag(ow))
+        {
+            _dragItem = ow;
+            _dragStart = e.GetPosition(this);
+        }
+    }
+
+    private void OnCardMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_dragItem is null || e.LeftButton != MouseButtonState.Pressed) return;
+        var p = e.GetPosition(this);
+        if (!_dragActive &&
+            Math.Abs(p.X - _dragStart.X) + Math.Abs(p.Y - _dragStart.Y) > 8)
+        {
+            _dragActive = true;
+            if (DragCard(_dragItem) is { } b) b.Opacity = 0.55;
+        }
+    }
+
+    /// <summary>Cleanup when the release lands on padding instead of a card
+    /// (card handlers only fire over card content).</summary>
+    private void OnOverlayMouseUp(object sender, MouseButtonEventArgs e) => EndDrag();
+
+    private void EndDrag()
+    {
+        if (_dragItem is not null && DragCard(_dragItem) is { } b) b.Opacity = 1;
+        _dragItem = null;
+        _dragActive = false;
+    }
+
+    private Border? DragCard(OverlayWindow w) =>
+        WindowsList.ItemContainerGenerator.ContainerFromItem(w) is ContentPresenter cp
+            ? WindowsList.ItemTemplate?.FindName("Card", cp) as Border
+            : null;
+
+    private void OnPinClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
+        {
+            WindowSwitcherWpf.Services.Log.Info("CardEvent", $"pinclick '{ow.Title}'");
+            // The controller recomputes slots (pin freezes the number) and
+            // persists to order.json; the overlay re-renders from it.
+            _controller.TogglePin(ow.Hwnd);
+            RebuildFromSlots(preserveScroll: true);
+            e.Handled = true;
+        }
+    }
+
+    private void OnCloseClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
+        {
+            // Graceful close (same as the window's own ✕), not a kill.
+            NativeMethods.PostMessage(ow.Hwnd, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            WindowSwitcherWpf.Services.Log.Info("Overlay", $"close posted hwnd=0x{ow.Hwnd:X}");
+            e.Handled = true;
+            // Apps tear down asynchronously; refresh the grid once they do.
+            var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            t.Tick += (_, _) =>
+            {
+                t.Stop();
+                if (!_isOpen) return;
+                _controller.OpenOverlay();
+                Rebuild();
+            };
+            t.Start();
         }
     }
 }
@@ -555,6 +883,44 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new(nameof(IsSelected)));
         }
     }
+
+    // Slot badge "0".."10": 0 is the special most-recent slot, 1..10 the
+    // managed normal slots. Empty = unmanaged (no badge shown).
+    private string _slotBadge = "";
+    public string SlotBadge
+    {
+        get => _slotBadge;
+        set
+        {
+            if (_slotBadge == value) return;
+            _slotBadge = value;
+            PropertyChanged?.Invoke(this, new(nameof(SlotBadge)));
+            PropertyChanged?.Invoke(this, new(nameof(BadgeVisibility)));
+        }
+    }
+    public System.Windows.Visibility BadgeVisibility =>
+        string.IsNullOrEmpty(SlotBadge) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+
+    // Pinned windows keep their slot number; they are skipped by smart
+    // sort and cannot be dragged (enforced in the S4 drag model).
+    private bool _isPinned;
+    public bool IsPinned
+    {
+        get => _isPinned;
+        set
+        {
+            if (_isPinned == value) return;
+            _isPinned = value;
+            PropertyChanged?.Invoke(this, new(nameof(IsPinned)));
+            PropertyChanged?.Invoke(this, new(nameof(PinBrush)));
+        }
+    }
+
+    // Pin glyph: blue when pinned, gray when not — driven by a brush so
+    // the template only needs one TextBlock.
+    public System.Windows.Media.Brush PinBrush =>
+        IsPinned ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x00, 0x78, 0xD4))
+                 : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A));
     private BitmapSource? _thumbnail;
     public BitmapSource? Thumbnail
     {

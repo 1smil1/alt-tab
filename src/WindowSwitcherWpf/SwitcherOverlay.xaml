@@ -9,65 +9,200 @@
         Focusable="False"
         ShowActivated="False"
         WindowStartupLocation="CenterScreen"
-        Background="#F4F4F7"
+        Background="Transparent"
         SizeToContent="WidthAndHeight">
+    <WindowChrome.WindowChrome>
+        <WindowChrome GlassFrameThickness="-1" CaptionHeight="0"
+                      ResizeBorderThickness="0" CornerRadius="0"
+                      UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
     <Border x:Name="RootBorder"
-            BorderBrush="#22000000"
+            Background="Transparent"
+            BorderBrush="#3AFFFFFF"
             BorderThickness="1"
             CornerRadius="12"
             Padding="16"
             SnapsToDevicePixels="True"
-            UseLayoutRounding="True">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="32" ShadowDepth="2" Opacity="0.22" Color="#000000"/>
-        </Border.Effect>
-        <ScrollViewer x:Name="Scroller"
-                      VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled">
-            <ItemsControl x:Name="WindowsList" HorizontalAlignment="Left">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <WrapPanel Orientation="Horizontal"/>
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
+            UseLayoutRounding="True"
+            MouseLeftButtonUp="OnOverlayMouseUp">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <!-- Header (右上角): template picker, smart-sort picker + apply,
+                 export — all data from the exe-adjacent config.json. -->
+            <StackPanel Grid.Row="0"
+                        HorizontalAlignment="Right"
+                        Orientation="Horizontal"
+                        Margin="0,0,0,10">
+                <TextBlock Text="模板:"
+                           FontSize="12"
+                           Foreground="#FF404040"
+                           VerticalAlignment="Center"
+                           Margin="0,0,5,0"/>
+                <ComboBox x:Name="TemplateCombo"
+                          Width="130"
+                          FontSize="12"
+                          ToolTip="应用模板：已有标签和模板一一对应变成固定"
+                          SelectionChanged="OnTemplateSelected"/>
+                <TextBlock Text="排序:"
+                           FontSize="12"
+                           Foreground="#FF404040"
+                           VerticalAlignment="Center"
+                           Margin="12,0,5,0"/>
+                <ComboBox x:Name="SortCombo"
+                          Width="130"
+                          FontSize="12"
+                          ToolTip="智能排序方法（来自 config.json，可重复应用）"
+                          SelectionChanged="OnSortSelected"/>
+                <Button x:Name="SortApplyButton"
+                        Content="应用"
+                        FontSize="12"
+                        Padding="8,2"
+                        Margin="6,0,0,0"
+                        ToolTip="再次应用当前选中的智能排序"
+                        Click="OnSortApply"/>
+                <Button x:Name="ExportButton"
+                        Content="导出"
+                        FontSize="12"
+                        Padding="8,2"
+                        Margin="6,0,0,0"
+                        ToolTip="把当前槽位布局导出为模板（存入 config.json）"
+                        Click="OnExportClick"/>
+            </StackPanel>
+            <ScrollViewer x:Name="Scroller"
+                          Grid.Row="1"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl x:Name="WindowsList" HorizontalAlignment="Left">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <Border x:Name="Card"
                                 Margin="6"
                                 CornerRadius="8"
-                                BorderBrush="#1A000000"
-                                BorderThickness="1"
                                 Cursor="Hand"
+                                MouseLeftButtonDown="OnCardMouseDown"
+                                MouseMove="OnCardMouseMove"
                                 MouseLeftButtonUp="OnCardClick">
                             <Border.Style>
                                 <Style TargetType="Border">
+                                    <!-- BorderBrush/Thickness live here (not on
+                                         the element) so the selection trigger
+                                         can actually override them — local
+                                         values always beat style triggers. -->
+                                    <Setter Property="BorderBrush" Value="#1A000000"/>
+                                    <Setter Property="BorderThickness" Value="1"/>
                                     <Setter Property="Background" Value="#FFFFFFFF"/>
                                     <Style.Triggers>
                                         <Trigger Property="IsMouseOver" Value="True">
                                             <Setter Property="Background" Value="#EAF3FF"/>
                                         </Trigger>
                                         <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                            <Setter Property="BorderBrush" Value="#FF5B8DEF"/>
-                                            <Setter Property="BorderThickness" Value="2"/>
+                                            <Setter Property="BorderBrush" Value="#FF0078D4"/>
+                                            <Setter Property="BorderThickness" Value="3"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
                             <StackPanel>
-                                <StackPanel Orientation="Horizontal" Margin="8,7,8,7">
-                                    <Image Width="20" Height="20"
-                                           VerticalAlignment="Center"
-                                           Source="{Binding Icon}"
-                                           RenderOptions.BitmapScalingMode="HighQuality"/>
-                                    <TextBlock Text="{Binding DisplayTitle}"
-                                               Foreground="#202020"
-                                               FontSize="12"
-                                               FontWeight="SemiBold"
+                                <Grid Margin="8,7,8,7">
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                                        <!-- Slot number badge sits top-left, in
+                                             front of the title logo (数字放左上
+                                             角，标题logo前面): 0 = most recent,
+                                             1..10 managed slots, hidden if
+                                             unmanaged. -->
+                                        <Border Background="#14000000"
+                                                CornerRadius="4"
+                                                Margin="0,0,5,0"
+                                                VerticalAlignment="Center"
+                                                Visibility="{Binding BadgeVisibility}"
+                                                ToolTip="Alt+数字 直达此标签">
+                                            <TextBlock Text="{Binding SlotBadge}"
+                                                       FontSize="10"
+                                                       FontWeight="Bold"
+                                                       Foreground="#FF5A5A5A"
+                                                       Margin="4,1"/>
+                                        </Border>
+                                        <Image Width="20" Height="20"
                                                VerticalAlignment="Center"
-                                               Margin="7,0,0,0"
-                                               MaxWidth="300"
-                                               TextTrimming="CharacterEllipsis"/>
-                                </StackPanel>
+                                               Source="{Binding Icon}"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        <TextBlock Text="{Binding DisplayTitle}"
+                                                   Foreground="#202020"
+                                                   FontSize="12"
+                                                   FontWeight="SemiBold"
+                                                   VerticalAlignment="Center"
+                                                   Margin="7,0,0,0"
+                                                   MaxWidth="230"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                    <!-- Hover tools on the right: pin and
+                                         close (hover only, opacity keeps
+                                         layout stable so nothing shifts). -->
+                                    <StackPanel Orientation="Horizontal"
+                                                HorizontalAlignment="Right"
+                                                VerticalAlignment="Center">
+                                        <Border Background="Transparent"
+                                                CornerRadius="4"
+                                                Margin="2,0"
+                                                Width="20" Height="20"
+                                                MouseLeftButtonDown="OnToolDown"
+                                                MouseLeftButtonUp="OnPinClick"
+                                                ToolTip="固定此槽位">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Opacity" Value="0"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding ElementName=Card, Path=IsMouseOver}" Value="True">
+                                                            <Setter Property="Opacity" Value="1"/>
+                                                        </DataTrigger>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter Property="Background" Value="#14000000"/>
+                                                        </Trigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="📌"
+                                                       FontSize="10"
+                                                       Foreground="{Binding PinBrush}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                        </Border>
+                                        <Border Background="Transparent"
+                                                CornerRadius="4"
+                                                Margin="2,0"
+                                                Width="20" Height="20"
+                                                MouseLeftButtonDown="OnToolDown"
+                                                MouseLeftButtonUp="OnCloseClick"
+                                                ToolTip="关闭窗口">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Opacity" Value="0"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding ElementName=Card, Path=IsMouseOver}" Value="True">
+                                                            <Setter Property="Opacity" Value="1"/>
+                                                        </DataTrigger>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter Property="Background" Value="#14E81123"/>
+                                                        </Trigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="✕"
+                                                       FontSize="11"
+                                                       Foreground="#FF616161"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                        </Border>
+                                    </StackPanel>
+                                </Grid>
                                 <Border x:Name="ThumbBorder"
                                         CornerRadius="6"
                                         Background="#FFEFEFEF"
@@ -97,7 +232,8 @@
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
+                </ItemsControl>
+            </ScrollViewer>
+        </Grid>
     </Border>
 </Window>
