@@ -142,10 +142,9 @@ public partial class App : Application
     private void OnOverlayCommit()
     {
         Log.Info("App", "OnOverlayCommit");
-        // Activate the selected window FIRST (the overlay window still
-        // owns the foreground while visible; we have to release that
-        // before the target window can take focus).
-        _controller?.Commit();
+        // overlay.Commit() activates the selection exactly once (it guards
+        // on _isOpen); calling _controller.Commit() here too made EVERY
+        // commit run twice.
         _overlay?.Commit();
         _keyboard?.SetOverlayOpen(false);
     }

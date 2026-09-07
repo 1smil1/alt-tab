@@ -278,6 +278,13 @@ public partial class SwitcherOverlay : Window
     // real content — the same trick the native taskbar/Alt+Tab relies on.
     private void PrepareMinimizedThenRegister()
     {
+        // A quick Alt+` flick commits/cancels within milliseconds; the
+        // restore dance serves only thumbnail generation and visibly
+        // disturbs every minimized window. Never start it for a closed
+        // overlay, and never start it twice concurrently.
+        if (!_isOpen) return;
+        if (System.Threading.Interlocked.CompareExchange(
+                ref _danceRunning, 1, 0) == 1) return;
         var minimized = _windows.Where(w => NativeMethods.IsIconic(w.Hwnd))
             .Select(w => w.Hwnd).ToList();
         WindowSwitcherWpf.Services.Log.Info("Overlay",
@@ -291,20 +298,35 @@ public partial class SwitcherOverlay : Window
         {
             try
             {
+                // Give the user a beat to flick-commit; a closed overlay
+                // cancels the dance entirely.
+                System.Threading.Thread.Sleep(300);
+                if (!_isOpen) return;
                 // Batch dance: restore ALL cloaked, wait once so slow
                 // renderers (Zotero/GTK need several hundred ms) finish
                 // painting, then minimize ALL. Time is O(1) in window count.
+                // Cloak is DENIED (E_ACCESSDENIED) for elevated apps'
+                // windows — restoring those would flash them on screen, so
+                // only windows whose cloak succeeded get restored.
+                var restored = new List<IntPtr>();
                 foreach (var h in minimized)
                 {
                     var cloak = 1;
-                    NativeMethods.DwmSetWindowAttribute(
+                    var hrSet = NativeMethods.DwmSetWindowAttribute(
                         h, NativeMethods.DWMWA_CLOAK, ref cloak, sizeof(int));
-                    NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWNOACTIVATE);
+                    if (hrSet == 0) restored.Add(h);
+                    else WindowSwitcherWpf.Services.Log.Info("Overlay",
+                        $"cloak denied, skipping restore (no flash) hwnd=0x{h.ToInt64():X}");
                 }
+                foreach (var h in restored)
+                    NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWNOACTIVATE);
                 System.Threading.Thread.Sleep(600);
+                // Re-minimize and uncloak EVERYTHING we touched, even if
+                // the overlay closed mid-dance.
+                foreach (var h in restored)
+                    NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWMINNOACTIVE);
                 foreach (var h in minimized)
                 {
-                    NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWMINNOACTIVE);
                     var cloak = 0;
                     NativeMethods.DwmSetWindowAttribute(
                         h, NativeMethods.DWMWA_CLOAK, ref cloak, sizeof(int));
@@ -317,10 +339,16 @@ public partial class SwitcherOverlay : Window
             {
                 WindowSwitcherWpf.Services.Log.Exception("Overlay.CloakRestore", ex);
             }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _danceRunning, 0);
+            }
             Dispatcher.BeginInvoke(new Action(RegisterLiveThumbnails),
                 DispatcherPriority.ApplicationIdle);
         });
     }
+
+    private int _danceRunning;
 
     private void RegisterLiveThumbnails()
     {
