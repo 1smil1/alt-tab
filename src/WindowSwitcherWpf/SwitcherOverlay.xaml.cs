@@ -137,7 +137,14 @@ public partial class SwitcherOverlay : Window
         {
             for (var i = 0; i < g.Windows.Count; i++)
             {
-                _windows.Add(new OverlayWindow(g.Windows[i], g.Key, i));
+                var ow = new OverlayWindow(g.Windows[i], g.Key, i);
+                var cached = LookupCache(ow.Hwnd);
+                if (cached is not null)
+                {
+                    ow.Thumbnail = cached.Thumb;
+                    ow.Icon = cached.Icon;
+                }
+                _windows.Add(ow);
             }
         }
         WindowSwitcherWpf.Services.Log.Info("Overlay", $"rebuild windows={_windows.Count}");
@@ -196,7 +203,11 @@ public partial class SwitcherOverlay : Window
                         if (bmp is not null)
                         {
                             bmp.Freeze();
-                            Dispatcher.BeginInvoke(new Action(() => w.Thumbnail = bmp));
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                w.Thumbnail = bmp;
+                                StoreCache(w.Hwnd, thumb: bmp, icon: null);
+                            }));
                             thumbDone++;
                         }
                     }
@@ -205,7 +216,11 @@ public partial class SwitcherOverlay : Window
                         var icon = WindowSwitcherWpf.Interop.AppIcon.Resolve(w.Hwnd, w.ModulePath, 20);
                         if (icon is not null)
                         {
-                            Dispatcher.BeginInvoke(new Action(() => w.Icon = icon));
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                w.Icon = icon;
+                                StoreCache(w.Hwnd, thumb: null, icon: icon);
+                            }));
                             iconDone++;
                         }
                     }
@@ -283,9 +298,13 @@ public partial class SwitcherOverlay : Window
         // disturbs every minimized window. Never start it for a closed
         // overlay, and never start it twice concurrently.
         if (!_isOpen) return;
+        RegisterLiveThumbnails(); // instant live previews — do NOT wait for the dance
         if (System.Threading.Interlocked.CompareExchange(
                 ref _danceRunning, 1, 0) == 1) return;
-        var minimized = _windows.Where(w => NativeMethods.IsIconic(w.Hwnd))
+        // Windows we have danced before keep their restored-size DWM
+        // surface while minimized — only never-danced ones need the dance.
+        var minimized = _windows.Where(w => NativeMethods.IsIconic(w.Hwnd)
+                && !s_dancedHwnds.Contains(w.Hwnd.ToInt64()))
             .Select(w => w.Hwnd).ToList();
         WindowSwitcherWpf.Services.Log.Info("Overlay",
             $"minimized windows needing cloaked restore: {minimized.Count}");
@@ -343,9 +362,51 @@ public partial class SwitcherOverlay : Window
             {
                 System.Threading.Interlocked.Exchange(ref _danceRunning, 0);
             }
-            Dispatcher.BeginInvoke(new Action(RegisterLiveThumbnails),
-                DispatcherPriority.ApplicationIdle);
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                foreach (var h in minimized)
+                {
+                    s_dancedHwnds.Add(h.ToInt64());
+                    var ow = _windows.FirstOrDefault(w => w.Hwnd == h);
+                    if (ow is not null) ow.HasLivePreview = true;
+                }
+            }), DispatcherPriority.ApplicationIdle);
         });
+    }
+
+    // Hwnds whose DWM surface was upgraded by the cloaked restore at least
+    // once; a once-danced window keeps its restored-size surface while
+    // minimized, so repeat opens never pay the dance cost again.
+    private static readonly HashSet<long> s_dancedHwnds = new();
+
+    // Static-capture caches: OverlayWindow instances are rebuilt on every
+    // open; without these, every Alt+` re-captured all PrintWindow bitmaps
+    // and previews visibly popped in one by one. UI-thread only. Hwnds are
+    // recycled by Windows, so entries carry the owning pid and are dropped
+    // when the hwnd now belongs to a different process.
+    private sealed record CachedVisual(BitmapSource? Thumb, BitmapSource? Icon, int Pid);
+    private static readonly Dictionary<IntPtr, CachedVisual> s_visualCache = new();
+
+    private static CachedVisual? LookupCache(IntPtr hwnd)
+    {
+        if (!s_visualCache.TryGetValue(hwnd, out var v)) return null;
+        NativeMethods.GetWindowThreadProcessId(hwnd, out var pidU); var pid = (int)pidU;
+        if (pid != v.Pid)
+        {
+            s_visualCache.Remove(hwnd); // hwnd recycled to another process
+            return null;
+        }
+        return v;
+    }
+
+    private static void StoreCache(IntPtr hwnd, BitmapSource? thumb, BitmapSource? icon)
+    {
+        var existing = s_visualCache.TryGetValue(hwnd, out var v) ? v : null;
+        NativeMethods.GetWindowThreadProcessId(hwnd, out var pidU); var pid = (int)pidU;
+        s_visualCache[hwnd] = new CachedVisual(
+            thumb ?? existing?.Thumb,
+            icon ?? existing?.Icon,
+            pid);
     }
 
     private int _danceRunning;
@@ -369,7 +430,11 @@ public partial class SwitcherOverlay : Window
                     continue;
                 }
                 _liveThumbs[w.Hwnd] = id;
-                w.HasLivePreview = true;
+                // Never-danced minimized windows would show their tiny
+                // minimized frame; keep the static/placeholder card up
+                // until the dance upgrades the surface (~1s).
+                w.HasLivePreview = !NativeMethods.IsIconic(w.Hwnd)
+                    || s_dancedHwnds.Contains(w.Hwnd.ToInt64());
             }
             catch (Exception ex)
             {

@@ -25,6 +25,17 @@ public static class Log
     }
 
     public static void Info(string category, string message) => Write("INFO", category, message);
+
+    /// <summary>
+    /// Per-window/per-item diagnostics. These dominated Alt+` open latency
+    /// (800+ File.AppendAllText calls ≈ 250ms on every keypress), so they
+    /// are skipped unless WINDOWSWITCHER_VERBOSE=1 is set.
+    /// </summary>
+    public static void Verbose(string category, string message)
+    {
+        if (Environment.GetEnvironmentVariable("WINDOWSWITCHER_VERBOSE") != "1") return;
+        Write("INFO", category, message);
+    }
     public static void Warn(string category, string message) => Write("WARN", category, message);
     public static void Error(string category, string message) => Write("ERROR", category, message);
 

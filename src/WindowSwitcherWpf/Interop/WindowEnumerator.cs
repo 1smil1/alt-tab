@@ -23,7 +23,7 @@ public sealed class WindowEnumerator
     {
         var hwnds = new List<IntPtr>();
         EnumWindows((h, _) => { hwnds.Add(h); return true; }, IntPtr.Zero);
-        WindowSwitcherWpf.Services.Log.Info("Enumerator", $"raw HWNDs={hwnds.Count}");
+        WindowSwitcherWpf.Services.Log.Verbose("Enumerator", $"raw HWNDs={hwnds.Count}");
 
         var valid = new List<(IntPtr hwnd, string title, uint pid)>();
         foreach (var hwnd in hwnds)
@@ -54,7 +54,7 @@ public sealed class WindowEnumerator
             var reason = IsEligible(hwnd, onlyCurrentDesktop)
                 ? (owner != IntPtr.Zero ? "has-owner" : (string.IsNullOrEmpty(t) ? "no-title" : "unknown"))
                 : DiagnoseReject(hwnd, onlyCurrentDesktop);
-            WindowSwitcherWpf.Services.Log.Info("Enumerator",
+            WindowSwitcherWpf.Services.Log.Verbose("Enumerator",
                 $"rejected: 0x{hwnd.ToInt64():X} reason={reason} ex=0x{exStyle.ToInt64():X} st=0x{style.ToInt64():X} owner=0x{owner.ToInt64():X} '{t}' [{proc}]");
         }
         // No per-PID dedup. Native Alt+Tab shows every real top-level
@@ -63,13 +63,13 @@ public sealed class WindowEnumerator
         // windows of the same process are excluded by the structural
         // checks and helper-title list, not by dedup.
         var deduped = valid;
-        WindowSwitcherWpf.Services.Log.Info("Enumerator",
+        WindowSwitcherWpf.Services.Log.Verbose("Enumerator",
             $"valid={deduped.Count}");
 
         var result = new List<WindowEntry>(deduped.Count);
         foreach (var (hwnd, title, origPid) in deduped)
         {
-            WindowSwitcherWpf.Services.Log.Info("Enumerator", $"valid: 0x{hwnd.ToInt64():X} '{title}'");
+            WindowSwitcherWpf.Services.Log.Verbose("Enumerator", $"valid: 0x{hwnd.ToInt64():X} '{title}'");
             var pid = origPid;
             var modulePath = GetModulePath(pid) ?? string.Empty;
             if (!IsValidModulePath(modulePath))
@@ -98,11 +98,11 @@ public sealed class WindowEnumerator
             var isMin = IsIconic(hwnd);
             var exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
             var style = GetWindowLongPtr(hwnd, GWL_STYLE);
-            WindowSwitcherWpf.Services.Log.Info("Enumerator",
+            WindowSwitcherWpf.Services.Log.Verbose("Enumerator",
                 $"kept: 0x{hwnd.ToInt64():X} '{title}' [{procName}] ex=0x{exStyle.ToInt64():X} st=0x{style.ToInt64():X}");
             result.Add(new WindowEntry(hwnd, title, procName, modulePath, groupKey, isMin));
         }
-        WindowSwitcherWpf.Services.Log.Info("Enumerator", $"final count={result.Count}");
+        WindowSwitcherWpf.Services.Log.Verbose("Enumerator", $"final count={result.Count}");
         return result;
     }
 
