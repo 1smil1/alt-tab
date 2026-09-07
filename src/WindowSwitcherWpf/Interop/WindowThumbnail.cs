@@ -17,8 +17,7 @@ namespace WindowSwitcherWpf.Interop;
 /// </summary>
 public static class WindowThumbnail
 {
-    private const int TargetWidth = 320;
-    private const int TargetHeight = 200;
+    private const int CaptureHeight = 320;
     private const uint PW_RENDERFULLCONTENT = 0x00000002;
 
     public static BitmapSource? Capture(IntPtr hwnd)
@@ -26,7 +25,20 @@ public static class WindowThumbnail
         if (hwnd == IntPtr.Zero) return null;
         try
         {
-            return PrintWindowToBitmap(hwnd, TargetWidth, TargetHeight);
+            // Native Alt+Tab look: fixed thumbnail height, width follows
+            // the window's real aspect ratio. Capture at 2x the on-screen
+            // height (2x150) so the downscale stays crisp. Minimized
+            // windows report a tiny rect -> keep the default 1.6 aspect.
+            var aspect = 1.6;
+            if (NativeMethods.GetWindowRect(hwnd, out var r))
+            {
+                var ww = r.Right - r.Left;
+                var wh = r.Bottom - r.Top;
+                if (ww > 100 && wh > 100) aspect = (double)ww / wh;
+            }
+            aspect = Math.Clamp(aspect, 0.6, 2.6);
+            var w = (int)Math.Clamp(CaptureHeight * aspect, 160, 832);
+            return PrintWindowToBitmap(hwnd, w, CaptureHeight);
         }
         catch (Exception ex)
         {

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using WindowSwitcherWpf.Interop;
@@ -31,6 +32,17 @@ public partial class SwitcherOverlay : Window
         InitializeComponent();
         DataContext = this;
         WindowsList.ItemsSource = _windows;
+
+        // Native Alt+Tab panel nearly fills the screen center; content
+        // beyond these caps scrolls (draggable scrollbar on the right).
+        MaxWidth = SystemParameters.WorkArea.Width * 0.94;
+        MaxHeight = SystemParameters.WorkArea.Height * 0.92;
+
+        // Any movement of the window or its viewport changes the
+        // client-coordinate destination rects of the DWM thumbnails.
+        LocationChanged += (_, _) => UpdateLiveRects();
+        SizeChanged += (_, _) => UpdateLiveRects();
+        Scroller.ScrollChanged += (_, _) => UpdateLiveRects();
 
         _thumbTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -59,6 +71,12 @@ public partial class SwitcherOverlay : Window
             }
             _isOpen = true;
             _thumbTimer.Start();
+            // DWM thumbnails are registered after the window is shown and
+            // fully laid out (destination rects are client coordinates).
+            // Minimized windows render their tiny minimized frame into DWM
+            // thumbnails, so they get a cloaked restore first.
+            Dispatcher.BeginInvoke(new Action(PrepareMinimizedThenRegister),
+                DispatcherPriority.ApplicationIdle);
             WindowSwitcherWpf.Services.Log.Info("Overlay", $"shown groups={_controller.Groups.Count} hwnd={new System.Windows.Interop.WindowInteropHelper(this).Handle:X}");
         }
         catch (Exception ex)
@@ -92,6 +110,7 @@ public partial class SwitcherOverlay : Window
         if (!_isOpen) return;
         _thumbTimer.Stop();
         _controller.Commit();
+        UnregisterLiveThumbnails();
         _isOpen = false;
         Hide();
     }
@@ -100,6 +119,7 @@ public partial class SwitcherOverlay : Window
     {
         if (!_isOpen) return;
         _thumbTimer.Stop();
+        UnregisterLiveThumbnails();
         _isOpen = false;
         Hide();
     }
@@ -156,8 +176,9 @@ public partial class SwitcherOverlay : Window
         var pending = new List<OverlayWindow>();
         for (var i = 0; i < _windows.Count; i++)
         {
-            if (_windows[i].Thumbnail is null || _windows[i].Icon is null)
-                pending.Add(_windows[i]);
+            var needThumb = _windows[i].Thumbnail is null && !_windows[i].HasLivePreview;
+            var needIcon = _windows[i].Icon is null;
+            if (needThumb || needIcon) pending.Add(_windows[i]);
         }
         if (pending.Count == 0) return;
 
@@ -169,7 +190,7 @@ public partial class SwitcherOverlay : Window
                 var w = pending[i];
                 try
                 {
-                    if (w.Thumbnail is null)
+                    if (w.Thumbnail is null && !w.HasLivePreview)
                     {
                         var bmp = WindowSwitcherWpf.Interop.WindowThumbnail.Capture(w.Hwnd);
                         if (bmp is not null)
@@ -239,13 +260,162 @@ public partial class SwitcherOverlay : Window
         }
     }
 
+    // ---------- DWM live thumbnails ----------
+    // DwmRegisterThumbnail requires a TOP-LEVEL destination hwnd; the
+    // overlay window itself is used, with one registered thumbnail per
+    // source window and a per-card client-coordinate destination rect.
+    // DWM composites the source window's live surface onto the card —
+    // same mechanism native Alt+Tab uses — so minimized and occluded
+    // windows still show real content with zero capture cost.
+
+    private readonly Dictionary<IntPtr, IntPtr> _liveThumbs = new();
+
+    // A minimized window's DWM surface is its tiny minimized frame, so a
+    // live thumbnail shows a miniature window instead of content. Fix:
+    // restore it while CLOAKED (DWM composites cloaked windows off-screen,
+    // so nothing flashes), let it render, minimize it again, then uncloak.
+    // After this DWM holds a restored-size surface and the thumbnail shows
+    // real content — the same trick the native taskbar/Alt+Tab relies on.
+    private void PrepareMinimizedThenRegister()
+    {
+        var minimized = _windows.Where(w => NativeMethods.IsIconic(w.Hwnd))
+            .Select(w => w.Hwnd).ToList();
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"minimized windows needing cloaked restore: {minimized.Count}");
+        if (minimized.Count == 0)
+        {
+            RegisterLiveThumbnails();
+            return;
+        }
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                // Batch dance: restore ALL cloaked, wait once so slow
+                // renderers (Zotero/GTK need several hundred ms) finish
+                // painting, then minimize ALL. Time is O(1) in window count.
+                foreach (var h in minimized)
+                {
+                    var cloak = 1;
+                    NativeMethods.DwmSetWindowAttribute(
+                        h, NativeMethods.DWMWA_CLOAK, ref cloak, sizeof(int));
+                    NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWNOACTIVATE);
+                }
+                System.Threading.Thread.Sleep(600);
+                foreach (var h in minimized)
+                {
+                    NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWMINNOACTIVE);
+                    var cloak = 0;
+                    NativeMethods.DwmSetWindowAttribute(
+                        h, NativeMethods.DWMWA_CLOAK, ref cloak, sizeof(int));
+                }
+                System.Threading.Thread.Sleep(100);
+                WindowSwitcherWpf.Services.Log.Info("Overlay",
+                    $"cloaked restore done for {minimized.Count} windows");
+            }
+            catch (Exception ex)
+            {
+                WindowSwitcherWpf.Services.Log.Exception("Overlay.CloakRestore", ex);
+            }
+            Dispatcher.BeginInvoke(new Action(RegisterLiveThumbnails),
+                DispatcherPriority.ApplicationIdle);
+        });
+    }
+
+    private void RegisterLiveThumbnails()
+    {
+        if (!_isOpen) return; // closed while the cloaked-restore dance ran
+        UnregisterLiveThumbnails();
+        if (PresentationSource.FromVisual(this) is not HwndSource src) return;
+
+        foreach (var w in _windows)
+        {
+            if (_liveThumbs.ContainsKey(w.Hwnd)) continue;
+            try
+            {
+                var hr = NativeMethods.DwmRegisterThumbnail(src.Handle, w.Hwnd, out var id);
+                if (hr != 0)
+                {
+                    WindowSwitcherWpf.Services.Log.Info("Overlay",
+                        $"dwm register failed hr=0x{hr:X} hwnd=0x{w.Hwnd.ToInt64():X}");
+                    continue;
+                }
+                _liveThumbs[w.Hwnd] = id;
+                w.HasLivePreview = true;
+            }
+            catch (Exception ex)
+            {
+                WindowSwitcherWpf.Services.Log.Exception("Overlay.Register", ex);
+            }
+        }
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"live thumbnails registered={_liveThumbs.Count}/{_windows.Count}");
+        UpdateLiveRects();
+    }
+
+    private void UnregisterLiveThumbnails()
+    {
+        foreach (var id in _liveThumbs.Values)
+        {
+            try { NativeMethods.DwmUnregisterThumbnail(id); } catch { }
+        }
+        _liveThumbs.Clear();
+        foreach (var w in _windows) w.HasLivePreview = false;
+    }
+
+    private void UpdateLiveRects()
+    {
+        if (_liveThumbs.Count == 0) return;
+        try
+        {
+            var origin = RootBorder.PointToScreen(new Point(0, 0));
+            foreach (var w in _windows)
+            {
+                if (!_liveThumbs.TryGetValue(w.Hwnd, out var id)) continue;
+                var el = FindThumbBorder(w);
+                if (el is null || !el.IsLoaded) continue;
+                var tl = el.PointToScreen(new Point(0, 0));
+                var left = (int)(tl.X - origin.X);
+                var top = (int)(tl.Y - origin.Y);
+                var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
+                {
+                    dwFlags = NativeMethods.DWM_TNP_RECTDESTINATION
+                              | NativeMethods.DWM_TNP_VISIBLE
+                              | NativeMethods.DWM_TNP_SOURCECLIENTAREA,
+                    rcDestination = new NativeMethods.RECT
+                    {
+                        Left = left,
+                        Top = top,
+                        Right = left + (int)el.ActualWidth,
+                        Bottom = top + (int)el.ActualHeight,
+                    },
+                    fVisible = true,
+                    fSourceClientAreaOnly = true,
+                    opacity = 255,
+                };
+                NativeMethods.DwmUpdateThumbnailProperties(id, ref props);
+            }
+        }
+        catch (Exception ex)
+        {
+            WindowSwitcherWpf.Services.Log.Exception("Overlay.UpdateRects", ex);
+        }
+    }
+
+    private FrameworkElement? FindThumbBorder(OverlayWindow w)
+    {
+        if (WindowsList.ItemContainerGenerator.ContainerFromItem(w) is not ContentPresenter cp)
+            return null;
+        return WindowsList.ItemTemplate?.FindName("ThumbBorder", cp) as FrameworkElement;
+    }
+
     private void OnCardClick(object sender, MouseButtonEventArgs e)
     {
         if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
         {
-            for (var i = 0; i < _windows.Count; i++) _windows[i].IsSelected = false;
-            ow.IsSelected = true;
-            Commit();
+            // The controller's selection must follow the mouse, otherwise
+            // Commit() would activate the keyboard-selected window instead.
+            if (_controller.SelectByHwnd(ow.Hwnd)) Commit();
         }
     }
 }
@@ -279,8 +449,41 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
         {
             _thumbnail = value;
             PropertyChanged?.Invoke(this, new(nameof(Thumbnail)));
+            PropertyChanged?.Invoke(this, new(nameof(ThumbVisibility)));
+            PropertyChanged?.Invoke(this, new(nameof(PlaceholderVisibility)));
         }
     }
+
+    // Card thumbnail area width: fixed 150px height, width follows the
+    // window's real aspect ratio (native Alt+Tab sizing).
+    public double ThumbWidth { get; }
+
+    // True while a DWM live thumbnail is composited over the card — both
+    // the static capture and the icon placeholder are hidden because DWM
+    // draws the real window surface on top of the gray border.
+    private bool _hasLive;
+    public bool HasLivePreview
+    {
+        get => _hasLive;
+        set
+        {
+            if (_hasLive == value) return;
+            _hasLive = value;
+            PropertyChanged?.Invoke(this, new(nameof(HasLivePreview)));
+            PropertyChanged?.Invoke(this, new(nameof(ThumbVisibility)));
+            PropertyChanged?.Invoke(this, new(nameof(PlaceholderVisibility)));
+        }
+    }
+
+    public Visibility ThumbVisibility =>
+        (Thumbnail is not null && !_hasLive) ? Visibility.Visible : Visibility.Collapsed;
+
+    // The icon placeholder stays visible even when a DWM thumbnail is
+    // registered: it acts as an underlay. DWM draws over it for windows
+    // that render; for blank-rendering minimized windows (Microsoft
+    // Store) the icon shows through instead of a white rectangle.
+    public Visibility PlaceholderVisibility =>
+        Thumbnail is null ? Visibility.Visible : Visibility.Collapsed;
     private BitmapSource? _icon;
     public BitmapSource? Icon
     {
@@ -300,5 +503,14 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
         GroupKey = groupKey;
         IndexInGroup = index;
         ModulePath = entry.ModulePath;
+
+        var aspect = 1.6;
+        if (NativeMethods.GetWindowRect(entry.Hwnd, out var r))
+        {
+            var ww = r.Right - r.Left;
+            var wh = r.Bottom - r.Top;
+            if (ww > 100 && wh > 100) aspect = (double)ww / wh;
+        }
+        ThumbWidth = Math.Round(150 * Math.Clamp(aspect, 0.6, 2.6));
     }
 }

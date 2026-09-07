@@ -1,7 +1,6 @@
 <Window x:Class="WindowSwitcherWpf.SwitcherOverlay"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:ctl="clr-namespace:WindowSwitcherWpf.Controls"
         Title="Window Switcher"
         WindowStyle="None"
         ResizeMode="NoResize"
@@ -11,37 +10,51 @@
         ShowActivated="False"
         WindowStartupLocation="CenterScreen"
         Background="#F4F4F7"
-        SizeToContent="WidthAndHeight"
-        MaxHeight="760"
-        MaxWidth="1400">
-    <Border BorderBrush="#22000000"
+        SizeToContent="WidthAndHeight">
+    <Border x:Name="RootBorder"
+            BorderBrush="#22000000"
             BorderThickness="1"
             CornerRadius="12"
-            Padding="14"
+            Padding="16"
             SnapsToDevicePixels="True"
             UseLayoutRounding="True">
         <Border.Effect>
             <DropShadowEffect BlurRadius="32" ShadowDepth="2" Opacity="0.22" Color="#000000"/>
         </Border.Effect>
-        <StackPanel Orientation="Vertical">
-            <ItemsControl x:Name="WindowsList" ItemsSource="{Binding AllWindows}">
+        <ScrollViewer x:Name="Scroller"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <ItemsControl x:Name="WindowsList" HorizontalAlignment="Left">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <WrapPanel Orientation="Horizontal" MaxWidth="1320" />
+                        <WrapPanel Orientation="Horizontal"/>
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <Border x:Name="Card"
                                 Margin="6"
-                                Width="240"
                                 CornerRadius="8"
-                                Background="Transparent"
-                                BorderThickness="0"
+                                BorderBrush="#1A000000"
+                                BorderThickness="1"
                                 Cursor="Hand"
                                 MouseLeftButtonUp="OnCardClick">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background" Value="#FFFFFFFF"/>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Background" Value="#EAF3FF"/>
+                                        </Trigger>
+                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                            <Setter Property="BorderBrush" Value="#FF5B8DEF"/>
+                                            <Setter Property="BorderThickness" Value="2"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
                             <StackPanel>
-                                <StackPanel Orientation="Horizontal" Margin="6,4,6,6">
+                                <StackPanel Orientation="Horizontal" Margin="8,7,8,7">
                                     <Image Width="20" Height="20"
                                            VerticalAlignment="Center"
                                            Source="{Binding Icon}"
@@ -51,37 +64,40 @@
                                                FontSize="12"
                                                FontWeight="SemiBold"
                                                VerticalAlignment="Center"
-                                               Margin="6,0,0,0"
-                                               MaxWidth="190"
+                                               Margin="7,0,0,0"
+                                               MaxWidth="300"
                                                TextTrimming="CharacterEllipsis"/>
                                 </StackPanel>
-                                <Border CornerRadius="6"
-                                        Background="White"
+                                <Border x:Name="ThumbBorder"
+                                        CornerRadius="6"
+                                        Background="#FFEFEFEF"
                                         BorderBrush="#22000000"
                                         BorderThickness="1"
+                                        Margin="7,0,7,7"
                                         Height="150"
-                                        Margin="4,0,4,6"
+                                        Width="{Binding ThumbWidth}"
                                         ClipToBounds="True">
-                                    <Image Source="{Binding Thumbnail}"
-                                           Stretch="UniformToFill"
-                                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                                    <Grid>
+                                        <Image x:Name="ThumbImage"
+                                               Source="{Binding Thumbnail}"
+                                               Height="150"
+                                               Stretch="Uniform"
+                                               HorizontalAlignment="Left"
+                                               Visibility="{Binding ThumbVisibility}"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        <Image Width="44" Height="44"
+                                               Source="{Binding Icon}"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               Visibility="{Binding PlaceholderVisibility}"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                    </Grid>
                                 </Border>
                             </StackPanel>
                         </Border>
-                        <DataTemplate.Triggers>
-                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                <Setter TargetName="Card" Property="Background" Value="#1A5B8DEF"/>
-                                <Setter TargetName="Card" Property="BorderBrush" Value="#FF5B8DEF"/>
-                                <Setter TargetName="Card" Property="BorderThickness" Value="2"/>
-                            </DataTrigger>
-                        </DataTemplate.Triggers>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
-            <TextBlock Text="Hold Alt + tap ` to cycle. Release Alt to commit, Esc to cancel."
-                       Foreground="#5A5A5A"
-                       FontSize="11"
-                       Margin="8,10,0,0"/>
-        </StackPanel>
+        </ScrollViewer>
     </Border>
 </Window>

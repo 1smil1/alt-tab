@@ -165,6 +165,9 @@ public static class NativeMethods
     [DllImport("dwmapi.dll")]
     public static extern int DwmUpdateThumbnailProperties(IntPtr hThumbnailId, ref DWM_THUMBNAIL_PROPERTIES ptnProperties);
 
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct DWM_THUMBNAIL_PROPERTIES
     {
@@ -177,7 +180,11 @@ public static class NativeMethods
     }
 
     public const int DWMWA_CLOAKED = 14;
+    public const int DWMWA_CLOAK = 13;
     public const int DWMWA_HAS_ICONIC_BITMAP = 10;
+
+    public const int SW_SHOWNOACTIVATE = 4;
+    public const int SW_SHOWMINNOACTIVE = 7;
     public const int DWM_TNP_RECTDESTINATION = 0x00000001;
     public const int DWM_TNP_RECTSOURCE = 0x00000002;
     public const int DWM_TNP_OPACITY = 0x00000004;

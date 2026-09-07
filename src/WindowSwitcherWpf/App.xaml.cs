@@ -68,6 +68,20 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Length > 0 && e.Args[0] == "--show-overlay")
+        {
+            // Test mode: open the overlay immediately so a scripted screen
+            // capture can verify layout. Kill the process to close it.
+            _orderStore = new OrderStore();
+            _grouping = new WindowGroupingService();
+            _controller = new SwitcherController(
+                new WindowEnumerator(), _grouping, _orderStore,
+                hwnd => ActivationService.Activate(hwnd));
+            _overlay = new SwitcherOverlay(_controller);
+            _overlay.ShowAndFocus();
+            return;
+        }
+
         _orderStore = new OrderStore();
         _grouping = new WindowGroupingService();
 

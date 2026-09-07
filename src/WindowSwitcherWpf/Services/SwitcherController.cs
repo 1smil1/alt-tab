@@ -66,6 +66,25 @@ public sealed class SwitcherController
         }
     }
 
+    /// <summary>Makes <paramref name="hwnd"/> the committed-on-Enter target
+    /// (mouse click path — the visual selection must match the controller).</summary>
+    public bool SelectByHwnd(IntPtr hwnd)
+    {
+        for (var gi = 0; gi < Groups.Count; gi++)
+        {
+            var g = Groups[gi];
+            for (var wi = 0; wi < g.Windows.Count; wi++)
+            {
+                if (g.Windows[wi].Hwnd != hwnd) continue;
+                ActiveGroupIndex = gi;
+                ActiveWindowIndex = wi;
+                StateChanged?.Invoke();
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void Commit()
     {
         if (!HasWindows) return;
