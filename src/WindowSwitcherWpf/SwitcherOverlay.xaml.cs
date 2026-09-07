@@ -316,6 +316,7 @@ public partial class SwitcherOverlay : Window
             _windows.Add(ow);
         }
         WindowSwitcherWpf.Services.Log.Info("Overlay", $"rebuild windows={_windows.Count}");
+        AssignGroupAccents();
         // Thumbnail capture happens via _thumbTimer, NEVER in Rebuild,
         // otherwise 113 PrintWindow calls block the dispatcher for ~2s
         // and the user releases Alt before the window is shown.
@@ -345,6 +346,66 @@ public partial class SwitcherOverlay : Window
                 $"screen=({(int)tl.X},{(int)tl.Y})-({(int)br.X},{(int)br.Y}) '{w.Title}'");
             if (i > 12) break;
         }
+    }
+
+    // 8-hue structural palette; index comes from a stable FNV-1a hash of
+    // the GroupKey so a given app keeps its color across sessions (never
+    // string.GetHashCode — that is randomized per process).
+    private static readonly System.Windows.Media.Color[] GroupPalette =
+    {
+        System.Windows.Media.Color.FromRgb(0x25, 0x63, 0xEB), // blue
+        System.Windows.Media.Color.FromRgb(0x16, 0xA3, 0x4A), // green
+        System.Windows.Media.Color.FromRgb(0xEA, 0x58, 0x0C), // orange
+        System.Windows.Media.Color.FromRgb(0x93, 0x33, 0xEA), // purple
+        System.Windows.Media.Color.FromRgb(0x08, 0x91, 0xB2), // cyan
+        System.Windows.Media.Color.FromRgb(0xDB, 0x27, 0x77), // magenta
+        System.Windows.Media.Color.FromRgb(0xCA, 0x8A, 0x04), // dark yellow
+        System.Windows.Media.Color.FromRgb(0xDC, 0x26, 0x26), // red
+    };
+
+    private static uint Fnv1a(string s)
+    {
+        unchecked
+        {
+            uint h = 2166136261;
+            foreach (var c in s) { h ^= c; h *= 16777619; }
+            return h;
+        }
+    }
+
+    private void AssignGroupAccents()
+    {
+        var map = new System.Collections.Generic.Dictionary<string, System.Windows.Media.Color>();
+        foreach (var w in _windows)
+        {
+            if (!map.TryGetValue(w.GroupKey, out var color))
+            {
+                color = GroupPalette[Fnv1a(w.GroupKey) % (uint)GroupPalette.Length];
+                map[w.GroupKey] = color;
+            }
+            w.SetGroupAccent(color);
+        }
+    }
+
+    // 悬停联动: light up every card of the hovered card's group so
+    // related windows are findable without any layout shift.
+    private void OnCardMouseEnter(object sender, MouseEventArgs e)
+    {
+        if (_dragActive) return;
+        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
+            SetGroupHighlight(ow.GroupKey, true);
+    }
+
+    private void OnCardMouseLeave(object sender, MouseEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
+            SetGroupHighlight(ow.GroupKey, false);
+    }
+
+    private void SetGroupHighlight(string groupKey, bool on)
+    {
+        foreach (var w in _windows)
+            if (w.GroupKey == groupKey) w.IsGroupHighlighted = on;
     }
 
     private void RebuildSelection()
@@ -937,6 +998,47 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     public System.Windows.Media.Brush PinBrush =>
         IsPinned ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x00, 0x78, 0xD4))
                  : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A));
+
+    // ---- Group accent (色码层) ----
+    // Zero-footprint categorization: each GroupKey maps to one palette
+    // hue (stable FNV-1a hash — pure structure, no app names). The hue
+    // shows as the card's 3px top strip + badge tint; hovering a card
+    // lights up its whole group so related windows are findable without
+    // moving anything (网格不动, 留空率不变).
+    private System.Windows.Media.Color _accent =
+        System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A);
+    private bool _isGroupHighlighted;
+
+    public bool IsGroupHighlighted
+    {
+        get => _isGroupHighlighted;
+        set
+        {
+            if (_isGroupHighlighted == value) return;
+            _isGroupHighlighted = value;
+            PropertyChanged?.Invoke(this, new(nameof(IsGroupHighlighted)));
+            PropertyChanged?.Invoke(this, new(nameof(GroupStripBrush)));
+            PropertyChanged?.Invoke(this, new(nameof(GroupBadgeBrush)));
+        }
+    }
+
+    public System.Windows.Media.Brush GroupStripBrush =>
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(
+            (byte)(_isGroupHighlighted ? 0xE0 : 0x50),
+            _accent.R, _accent.G, _accent.B));
+
+    public System.Windows.Media.Brush GroupBadgeBrush =>
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(
+            (byte)(_isGroupHighlighted ? 0x45 : 0x1E),
+            _accent.R, _accent.G, _accent.B));
+
+    public void SetGroupAccent(System.Windows.Media.Color c)
+    {
+        if (_accent == c) return;
+        _accent = c;
+        PropertyChanged?.Invoke(this, new(nameof(GroupStripBrush)));
+        PropertyChanged?.Invoke(this, new(nameof(GroupBadgeBrush)));
+    }
     private BitmapSource? _thumbnail;
     public BitmapSource? Thumbnail
     {

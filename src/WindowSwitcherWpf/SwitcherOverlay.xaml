@@ -89,7 +89,9 @@
                                 Cursor="Hand"
                                 MouseLeftButtonDown="OnCardMouseDown"
                                 MouseMove="OnCardMouseMove"
-                                MouseLeftButtonUp="OnCardClick">
+                                MouseLeftButtonUp="OnCardClick"
+                                MouseEnter="OnCardMouseEnter"
+                                MouseLeave="OnCardMouseLeave">
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <!-- BorderBrush/Thickness live here (not on
@@ -110,6 +112,15 @@
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
+                            <Grid>
+                                <!-- Group accent strip: 3px hue line at the
+                                     card top; brightens when any card of
+                                     the same app group is hovered. -->
+                                <Rectangle Height="3"
+                                           VerticalAlignment="Top"
+                                           Margin="14,3,14,0"
+                                           RadiusX="1.5" RadiusY="1.5"
+                                           Fill="{Binding GroupStripBrush}"/>
                             <StackPanel>
                                 <Grid Margin="8,7,8,7">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
@@ -118,7 +129,7 @@
                                              角，标题logo前面): 0 = most recent,
                                              1..10 managed slots, hidden if
                                              unmanaged. -->
-                                        <Border Background="#14000000"
+                                        <Border Background="{Binding GroupBadgeBrush}"
                                                 CornerRadius="4"
                                                 Margin="0,0,5,0"
                                                 VerticalAlignment="Center"
@@ -229,6 +240,7 @@
                                     </Grid>
                                 </Border>
                             </StackPanel>
+                            </Grid>
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
