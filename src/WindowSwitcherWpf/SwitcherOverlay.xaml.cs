@@ -59,11 +59,12 @@ public partial class SwitcherOverlay : Window
         ApplyAcrylic();
     }
 
-    // Native Alt+Tab look: Win11 system acrylic backdrop + rounded window
-    // corners. DwmExtendFrameIntoClientArea makes the DWM backdrop
-    // (DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW — the exact
-    // backdrop native Alt+Tab uses) show through the transparent WPF
-    // client area.
+    // Native Alt+Tab look: frosted acrylic + rounded window corners.
+    // DWMWA_SYSTEMBACKDROP_TYPE reports success but never draws under a
+    // WPF surface (the client area covers it — flat gray). The reliable
+    // path is SetWindowCompositionAttribute + ACCENT_ACRYLICBLURBEHIND:
+    // the desktop behind shows through, heavily blurred, with a light
+    // tint (背景颜色透出来, 朦胧度拉满). GradientColor is ABGR.
     private void ApplyAcrylic()
     {
         try
@@ -72,13 +73,28 @@ public partial class SwitcherOverlay : Window
             var round = NativeMethods.DWMWCP_ROUND;
             NativeMethods.DwmSetWindowAttribute(
                 hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
-            var backdrop = NativeMethods.DWMSBT_TRANSIENTWINDOW;
-            var hr = NativeMethods.DwmSetWindowAttribute(
-                hwnd, NativeMethods.DWMWA_SYSTEMBACKDROP_TYPE, ref backdrop, sizeof(int));
-            var margins = new NativeMethods.MARGINS { cxLeftWidth = -1, cxRightWidth = -1, cyTopHeight = -1, cyBottomHeight = -1 };
-            NativeMethods.DwmExtendFrameIntoClientArea(hwnd, ref margins);
+
+            var policy = new NativeMethods.AccentPolicy
+            {
+                AccentState = NativeMethods.AccentState.ACCENT_ENABLE_BLURBEHIND,
+                AccentFlags = 0,
+                GradientColor = 0, // tint is painted by WPF (RootBorder) so the
+                                   // blurred wallpaper keeps its saturation —
+                                   // ACRYLIC accent desaturates to flat gray
+            };
+            var pPolicy = System.Runtime.InteropServices.Marshal.AllocHGlobal(
+                System.Runtime.InteropServices.Marshal.SizeOf(policy));
+            System.Runtime.InteropServices.Marshal.StructureToPtr(policy, pPolicy, false);
+            var data = new NativeMethods.WINDOWCOMPOSITIONATTRIBDATA
+            {
+                Attribute = NativeMethods.WCA_ACCENT_POLICY,
+                Data = pPolicy,
+                SizeOfData = System.Runtime.InteropServices.Marshal.SizeOf(policy),
+            };
+            var ok = NativeMethods.SetWindowCompositionAttribute(hwnd, ref data);
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(pPolicy);
             WindowSwitcherWpf.Services.Log.Info("Overlay",
-                $"acrylic backdrop hr=0x{hr:X}");
+                $"acrylic accent ok={ok}");
         }
         catch (Exception ex)
         {

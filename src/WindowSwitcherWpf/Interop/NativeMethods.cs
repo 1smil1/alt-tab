@@ -220,7 +220,12 @@ public static class NativeMethods
         public int cyBottomHeight;
     }
 
-    public enum AccentState { ACCENT_DISABLED = 0, ACCENT_ENABLE_ACRYLICBLURBEHIND = 4 }
+    public enum AccentState
+    {
+        ACCENT_DISABLED = 0,
+        ACCENT_ENABLE_BLURBEHIND = 3,
+        ACCENT_ENABLE_ACRYLICBLURBEHIND = 4,
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct AccentPolicy
@@ -228,6 +233,9 @@ public static class NativeMethods
         public AccentState AccentState;
         public int AccentFlags;
         public uint GradientColor; // ABGR
+        public int AnimationId;    // native ACCENT_POLICY is 16 bytes —
+                                   // missing field made SizeOfData=12 and the
+                                   // call silently fail (ok=0, no frost)
     }
 
     [StructLayout(LayoutKind.Sequential)]

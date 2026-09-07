@@ -17,7 +17,7 @@
                       UseAeroCaptionButtons="False"/>
     </WindowChrome.WindowChrome>
     <Border x:Name="RootBorder"
-            Background="Transparent"
+            Background="#59FFFFFF"
             BorderBrush="#3AFFFFFF"
             BorderThickness="1"
             CornerRadius="12"
