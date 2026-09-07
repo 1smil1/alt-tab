@@ -17,7 +17,9 @@ namespace WindowSwitcherWpf.Interop;
 /// </summary>
 public static class WindowThumbnail
 {
-    private const int CaptureHeight = 320;
+    // Cards display at 150px; 200px leaves DPI headroom while keeping the
+    // cached bitmaps (24 windows ≈ 10MB) small.
+    private const int CaptureHeight = 200;
     private const uint PW_RENDERFULLCONTENT = 0x00000002;
 
     public static BitmapSource? Capture(IntPtr hwnd)

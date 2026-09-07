@@ -113,6 +113,7 @@ public partial class SwitcherOverlay : Window
         UnregisterLiveThumbnails();
         _isOpen = false;
         Hide();
+        EnterIdleMode();
     }
 
     public void Cancel()
@@ -122,6 +123,26 @@ public partial class SwitcherOverlay : Window
         UnregisterLiveThumbnails();
         _isOpen = false;
         Hide();
+        EnterIdleMode();
+    }
+
+    // Tray-app memory discipline: the overlay just did its bitmap burst;
+    // drop visual-cache entries for windows that no longer exist and trim
+    // the working set so idle RAM pages out to the pagefile.
+    private void EnterIdleMode()
+    {
+        var dead = new List<IntPtr>();
+        foreach (var kv in s_visualCache)
+        {
+            NativeMethods.GetWindowThreadProcessId(kv.Key, out var pidU);
+            if (pidU == 0) dead.Add(kv.Key);
+        }
+        foreach (var h in dead) s_visualCache.Remove(h);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        NativeMethods.SetProcessWorkingSetSize(new IntPtr(-1), new IntPtr(-1), new IntPtr(-1));
+        WindowSwitcherWpf.Services.Log.Info("Overlay", "idle: cache trimmed, working set requested");
     }
 
     public void SelectDigit(int digit)

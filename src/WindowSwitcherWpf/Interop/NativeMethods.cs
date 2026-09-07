@@ -185,6 +185,9 @@ public static class NativeMethods
 
     public const int SW_SHOWNOACTIVATE = 4;
     public const int SW_SHOWMINNOACTIVE = 7;
+
+    [DllImport("kernel32.dll")]
+    public static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr min, IntPtr max);
     public const int DWM_TNP_RECTDESTINATION = 0x00000001;
     public const int DWM_TNP_RECTSOURCE = 0x00000002;
     public const int DWM_TNP_OPACITY = 0x00000004;
