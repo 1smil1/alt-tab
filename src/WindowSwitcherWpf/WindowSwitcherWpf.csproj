@@ -16,6 +16,7 @@
     <Page Include="App.xaml" SubType="Designer" Generator="MSBuild:Compile" />
     <Page Include="MainWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
     <Page Include="SwitcherOverlay.xaml" SubType="Designer" Generator="MSBuild:Compile" />
+    <Page Include="SettingsWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
   </ItemGroup>
 
   <ItemGroup>

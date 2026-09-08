@@ -107,6 +107,21 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Length > 0 && e.Args[0] == "--show-settings")
+        {
+            // Test mode: open the settings window immediately so a scripted
+            // screen capture can verify layout. Kill the process to close it.
+            _orderStore = new OrderStore();
+            _grouping = new WindowGroupingService();
+            var configStore = new ConfigStore();
+            _controller = new SwitcherController(
+                new WindowEnumerator(), _grouping, _orderStore,
+                hwnd => ActivationService.Activate(hwnd), configStore);
+            var settings = new SettingsWindow(configStore, null);
+            settings.Show();
+            return;
+        }
+
         if (e.Args.Length > 0 && e.Args[0] == "--show-overlay")
         {
             // Test mode: open the overlay immediately so a scripted screen
@@ -168,6 +183,8 @@ public partial class App : Application
         _keyboard.QuickJumpUp += OnQuickJumpUp;
         _keyboard.Install();
 
+        _overlay!.SettingsRequested += OnSettingsRequested;
+
         // 轻量化: no tray icon, no taskbar presence — the resident exe IS
         // the app. Close it with 关闭应用.bat, remove it with 卸载.bat.
     }
@@ -177,6 +194,42 @@ public partial class App : Application
         Log.Info("App", "OnOverlayRequested");
         _overlay?.ShowAndFocus();
         _keyboard?.SetOverlayOpen(true);
+    }
+
+    private SettingsWindow? _settings;
+
+    /// <summary>⚙: 收起 overlay → 按需 new 设置窗口 (关闭即回收, 空闲零
+    /// 常驻). 保存回调 = 热生效: hook 重读热键配置 + controller 重载
+    /// config (模板/排序下拉即时刷新).</summary>
+    private void OnSettingsRequested()
+    {
+        Log.Info("App", "OnSettingsRequested");
+        _overlay?.Cancel();
+        _keyboard?.SetOverlayOpen(false);
+        if (_settings is { IsLoaded: true }) { _settings.Activate(); return; }
+        _settings = new SettingsWindow(new ConfigStore(),
+            OnSettingsSaved);
+        // 关闭即回收: 字段置空 + 主动收缩. 不然 _settings 一直钉着
+        // 已关闭窗口的整棵视觉树, 常驻内存 +17MB 不回落.
+        _settings.Closed += (_, _) =>
+        {
+            _settings = null;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            NativeMethods.SetProcessWorkingSetSize(new IntPtr(-1), new IntPtr(-1), new IntPtr(-1));
+            Log.Info("App", "settings closed → trimmed");
+        };
+        _settings.Show();
+        _settings.Activate();
+    }
+
+    private void OnSettingsSaved()
+    {
+        Log.Info("App", "OnSettingsSaved → hot reload");
+        _controller?.ReloadConfig();      // 先刷新 controller 缓存 —
+                                          // ApplyHotkeyConfig 读的就是它
+        ApplyHotkeyConfig(_keyboard!);
     }
 
     // ---------- 可配置热键 + 一次直达 (config.json → hook) ----------

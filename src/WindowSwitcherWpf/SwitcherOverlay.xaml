@@ -101,6 +101,13 @@
                         Margin="6,0,0,0"
                         ToolTip="把当前槽位布局导出为模板（存入 config.json）"
                         Click="OnExportClick"/>
+                <Button x:Name="SettingsButton"
+                        Content="⚙ 设置"
+                        FontSize="12"
+                        Padding="8,2"
+                        Margin="10,0,0,0"
+                        ToolTip="打开设置：快捷键 / 智能排序 / 模板"
+                        Click="OnSettingsClick"/>
             </StackPanel>
             <ScrollViewer x:Name="Scroller"
                           Grid.Row="1"

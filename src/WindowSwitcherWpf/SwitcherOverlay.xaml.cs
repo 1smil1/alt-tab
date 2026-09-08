@@ -296,6 +296,14 @@ public partial class SwitcherOverlay : Window
         WindowSwitcherWpf.Services.Log.Info("Overlay", $"export '{name}' slots={n}");
     }
 
+    public event Action? SettingsRequested;
+
+    private void OnSettingsClick(object sender, RoutedEventArgs e)
+    {
+        WindowSwitcherWpf.Services.Log.Info("Overlay", "settings requested");
+        SettingsRequested?.Invoke();
+    }
+
     /// <summary>Re-renders the card list from the controller's slot model
     /// (pins + flow + drag result). Slot 0 = most recent, 1..10 managed,
     /// -1 unmanaged (no badge). Pin toggles and drags rebuild with the
