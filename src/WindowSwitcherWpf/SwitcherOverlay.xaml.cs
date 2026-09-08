@@ -1345,22 +1345,30 @@ public partial class SwitcherOverlay : Window
         e.Handled = true;
     }
 
-    /// <summary>Release resolver for fan-strip/cascade-member drags: over a
-    /// card, resolve member-precise (cascade) or join (lone); off the cards,
-    /// the release peels the member out (剥离). Shared by OnCascadeUp and
+    /// <summary>Release resolver for fan-strip/cascade-member drags. The
+    /// folded cascade's span is checked first (member-precise insert or
+    /// same-stack reorder; releasing on the dragged member itself is a
+    /// no-op), then a lone card (join its stack); off the cards, the
+    /// release peels the member out (剥离). Shared by OnCascadeUp and
     /// OnOverlayMouseUp so routing can never double-handle.</summary>
     private void DropFanCardAt(Point p, IntPtr dragHwnd)
     {
+        if (CascadeAt(p) is { } c)
+        {
+            var tl = c.headCard.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            var r = CascadeRegion(c.st, c.head.ThumbWidth + 16, p.X - tl.X);
+            if (r is { } reg && c.st.Members[reg.index].Hwnd != dragHwnd)
+                _controller.StackDrop(dragHwnd, c.st.Members[reg.index].Hwnd, reg.before);
+            RebuildFromSlots(preserveScroll: true);
+            return;
+        }
         var card = CardAt(p);
         if (card is not null && card.DataContext is OverlayWindow t
             && t.Hwnd != dragHwnd)
         {
             var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var relPt = new Point(p.X - pos.X, p.Y - pos.Y);
-            if (_controller.StackInfoFor(t.Hwnd) is { } st)
-                DropOnCascadeMember(t, st, relPt, card, dragHwnd);
-            else
-                _controller.StackDrop(dragHwnd, t.Hwnd, before: relPt.X < card.ActualWidth / 2);
+            _controller.StackDrop(dragHwnd, t.Hwnd, before: relPt.X < card.ActualWidth / 2);
             RebuildFromSlots(preserveScroll: true);
             return;
         }
@@ -1369,30 +1377,50 @@ public partial class SwitcherOverlay : Window
     }
 
     /// <summary>Which cascade member region the point sits in, and whether
-    /// it is that member's insert-before half. Shared by the drag preview
-    /// (the line indicator) and the drop so they can never disagree.</summary>
+    /// it is that member's insert-before half. Geometry matches
+    /// LayoutCascades exactly: peek = cardW/2, sub i's visible region is
+    /// [i·peek, (i+1)·peek) and the last member's region is a full cardW
+    /// wide. Left half of a region = insert before that member, right half
+    /// = insert after. Shared by the drag preview (the line indicator) and
+    /// the drop so they can never disagree.</summary>
     private static (int index, bool before)? CascadeRegion(
         SwitcherController.WindowStackInfo st, double cardW, double x)
     {
         var n = st.Members.Count;
         if (n == 0 || cardW <= 0) return null;
-        var peek = cardW / (n + 1); // visible step; each sub-card is 2·peek
+        var peek = cardW / 2;
+        var spanX = (n - 1) * peek + cardW;
+        if (x < 0 || x >= spanX) return null;
         var i = Math.Min((int)(x / peek), n - 1);
-        var visW = i == n - 1 ? cardW - i * peek : peek;
-        return (i, x - i * peek < visW / 2);
+        var regionW = i == n - 1 ? cardW : peek;
+        return (i, x - i * peek < regionW / 2);
     }
 
-    /// <summary>Member-precise cascade drop (成员精确排序): the member
-    /// region under the pointer is the target, its visible half decides
-    /// before/after; dropping on another cascade's member joins that stack
-    /// at that spot.</summary>
-    private void DropOnCascadeMember(OverlayWindow head, SwitcherController.WindowStackInfo st,
-        Point p, FrameworkElement fe, IntPtr dragHwnd)
+    /// <summary>The folded cascade under a grid point: head card + the sub
+    /// peeks that reach (n-1)·peek past the head card, where CardAt finds
+    /// nothing. Member drags resolve here FIRST so drops on later subs
+    /// insert into the stack instead of falling through to 剥离.</summary>
+    private (Border headCard, OverlayWindow head,
+        SwitcherController.WindowStackInfo st)? CascadeAt(Point p)
     {
-        if (CascadeRegion(st, fe.ActualWidth, p.X) is not { } r) return;
-        var target = st.Members[r.index].Hwnd;
-        if (target != dragHwnd)
-            _controller.StackDrop(dragHwnd, target, r.before);
+        foreach (var ow in _windows)
+        {
+            if (_controller.StackInfoFor(ow.Hwnd) is not { } st
+                || st.Members.Count < 2) continue;
+            if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
+                is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border headCard) continue;
+            if (headCard.ActualWidth <= 0) continue;
+            var tl = headCard.TransformToVisual(WindowsList)
+                .Transform(new Point(0, 0));
+            var cardW = ow.ThumbWidth + 16;
+            var peek = cardW / 2;
+            var spanX = (st.Members.Count - 1) * peek + cardW;
+            if (p.X < tl.X || p.X >= tl.X + spanX
+                || p.Y < tl.Y || p.Y > tl.Y + headCard.ActualHeight) continue;
+            return (headCard, ow, st);
+        }
+        return null;
     }
 
     // ---------- Cascade hover (悬停哪个成员 = 选中哪个) ----------
@@ -1747,6 +1775,16 @@ public partial class SwitcherOverlay : Window
         EndDrag();
         if (dragHwnd == IntPtr.Zero) return;
         var p = e.GetPosition(WindowsList);
+        if (fromStrip)
+        {
+            // A cascade member carries just itself: the release resolves
+            // member-precise on a cascade span (including its own — a
+            // self-drop is a no-op), joins a lone card's stack (集中), or
+            // peels off the cards (剥离). Shared with OnCascadeUp so both
+            // routings behave identically.
+            DropFanCardAt(p, dragHwnd);
+            return;
+        }
         var inGrid = InCardGrid(p);
         var card = CardAt(p);
         if (card is not null && card.DataContext is OverlayWindow target)
@@ -1754,16 +1792,7 @@ public partial class SwitcherOverlay : Window
             if (target.Hwnd == dragHwnd) return; // released on itself: no-op
             var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var rel = (p.X - pos.X) / Math.Max(card.ActualWidth, 1);
-            if (fromStrip)
-            {
-                // A cascade member carries just itself: dropping it on a
-                // cascade resolves the exact member under the pointer; on a
-                // lone card it joins that card's stack (集中). Shared with
-                // OnCascadeUp so both routings behave identically.
-                DropFanCardAt(p, dragHwnd);
-                return;
-            }
-            else if (_controller.IsInStackView)
+            if (_controller.IsInStackView)
             {
                 // Sub view: every card is a member of the same stack, so any
                 // card drop reorders members (StackDropCore's same-stack
@@ -1855,24 +1884,30 @@ public partial class SwitcherOverlay : Window
         if (!_dragActive) return;
         if (e.LeftButton != MouseButtonState.Pressed) { EndDrag(); return; }
         var p = e.GetPosition(WindowsList);
+        if (_dragFromFanStrip && !_controller.IsInStackView
+            && CascadeAt(p) is { } c)
+        {
+            // Member in hand over a cascade's folded span: preview the
+            // exact member boundary the drop will insert at. The span
+            // reaches (n-1)·peek past the head card where CardAt finds
+            // nothing, so this must resolve before the CardAt lookup.
+            var tl = c.headCard.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            var cardW = c.head.ThumbWidth + 16;
+            if (CascadeRegion(c.st, cardW, p.X - tl.X) is { } r)
+            {
+                var peek = cardW / 2;
+                var regionW = r.index == c.st.Members.Count - 1 ? cardW : peek;
+                HideStackGlow();
+                ShowLine(tl.X + r.index * peek + (r.before ? 0 : regionW),
+                         tl.Y, c.headCard.ActualHeight);
+                return;
+            }
+        }
         var card = CardAt(p);
         if (card is not null)
         {
-            var vm = card.DataContext as OverlayWindow;
             var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             double? lineX = null;
-            if (_dragFromFanStrip && vm is not null
-                && _controller.StackInfoFor(vm.Hwnd) is { } st
-                && CascadeRegion(st, card.ActualWidth, p.X - pos.X) is { } r)
-            {
-                // Member in hand over a cascade: preview the exact member
-                // boundary — the line that 标签内部排序 will drop at.
-                var peek = card.ActualWidth / (st.Members.Count + 1);
-                var visW = r.index == st.Members.Count - 1
-                    ? card.ActualWidth - r.index * peek : peek;
-                lineX = pos.X + r.index * peek + (r.before ? 0 : visW);
-            }
-            else
             {
                 var rel = (p.X - pos.X) / Math.Max(card.ActualWidth, 1);
                 if (rel < 0.25) lineX = pos.X;                         // 左竖线
