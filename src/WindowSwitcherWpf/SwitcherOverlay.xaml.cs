@@ -971,6 +971,11 @@ public partial class SwitcherOverlay : Window
             var last = i == n - 1;
             // Visible width: full for the last card, half otherwise.
             var visW = last ? width : width / 2;
+            // Skip the sub's WPF title strip at the top so the DWM
+            // thumbnail doesn't paint over the title text.
+            const double subTitleHeight = 32;
+            double thumbTop = tl.Y - origin.Y + subTitleHeight;
+            double thumbHeight = height - subTitleHeight;
             var flags = NativeMethods.DWM_TNP_RECTDESTINATION
                         | NativeMethods.DWM_TNP_VISIBLE;
             var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
@@ -978,9 +983,9 @@ public partial class SwitcherOverlay : Window
                 rcDestination = new NativeMethods.RECT
                 {
                     Left = (int)(tl.X - origin.X),
-                    Top = (int)(tl.Y - origin.Y),
+                    Top = (int)thumbTop,
                     Right = (int)(tl.X - origin.X + visW),
-                    Bottom = (int)(tl.Y - origin.Y + height),
+                    Bottom = (int)(thumbTop + thumbHeight),
                 },
                 fVisible = true,
                 opacity = 255,
@@ -1017,16 +1022,18 @@ public partial class SwitcherOverlay : Window
 
     private void BuildCascades()
     {
-        // Detach any old cascade subs from their previous parent so the
-        // new run can re-parent them into DropLayer cleanly.
-        foreach (var old in _cascadeSubs.Values)
-            if (old.Parent is Panel p) p.Children.Remove(old);
-        _cascadeSubs.Clear();
-        if (!_isOpen || _controller.IsInStackView) return;
-        foreach (var ow in _windows)
+        try
         {
-            if (_controller.StackInfoFor(ow.Hwnd) is not { } st
-                || st.Members.Count < 2) continue;
+            // Detach any old cascade subs from their previous parent so the
+            // new run can re-parent them into DropLayer cleanly.
+            foreach (var old in _cascadeSubs.Values)
+                if (old.Parent is Panel p) p.Children.Remove(old);
+            _cascadeSubs.Clear();
+            if (!_isOpen || _controller.IsInStackView) return;
+            foreach (var ow in _windows)
+            {
+                if (_controller.StackInfoFor(ow.Hwnd) is not { } st
+                    || st.Members.Count < 2) continue;
             if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
                 is not ContentPresenter cp) continue;
             if (WindowsList.ItemTemplate?.FindName("CardRoot", cp) is not Grid root) continue;
@@ -1046,29 +1053,57 @@ public partial class SwitcherOverlay : Window
             }
         }
         // Position the cascade subs in DropLayer coords once the head card
-        // has its real screen rect (Render priority, same as the live
-        // thumbnail rects).
-        Dispatcher.BeginInvoke(new Action(LayoutCascades), DispatcherPriority.Render);
+        // has its real screen rect. The first pass may not have all head
+        // cards laid out yet (WrapPanel measures lazily), so LayoutCascades
+        // re-queues itself at Background priority until every head's
+        // ActualWidth > 0 or the pass cap is hit.
+        _layoutPassesRemaining = 30;
+        Dispatcher.BeginInvoke(new Action(LayoutCascades), DispatcherPriority.Background);
+        Dispatcher.BeginInvoke(new Action(LayoutCascades), DispatcherPriority.ApplicationIdle);
+        }
+        catch (Exception ex)
+        {
+            WindowSwitcherWpf.Services.Log.Exception("Cascade.Build", ex);
+        }
     }
 
     /// <summary>Position every cascade sub in DropLayer coords using the
-    /// head card's actual screen position. Subs are absolute-positioned
-    /// children of DropLayer (a Canvas), so they can extend past the head
-    /// card's natural width without disturbing the head's own template
-    /// layout. Re-runs on every SizeChanged/Layout pass via the
-    /// LocationChanged/SizeChanged hooks in the constructor.</summary>
+    /// head card's actual screen position. 从左往右叠半: sub i sits at
+    /// i·peek OVER the previous card — later children (BuildCascades add
+    /// order) draw on top, so the last member is the fully visible face
+    /// and every earlier member shows only its left peek. The head's
+    /// container gets (n-1)·peek of extra right margin so the WrapPanel
+    /// reserves room for the spread and the cascade never paints over the
+    /// neighbouring cards. Re-runs on every SizeChanged/ScrollChanged via
+    /// the constructor hooks.</summary>
     private void LayoutCascades()
     {
+        var pending = 0;
+        var marginDirty = false;
         foreach (var ow in _windows)
         {
-            if (_controller.StackInfoFor(ow.Hwnd) is not { } st
-                || st.Members.Count < 2) continue;
             if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
                 is not ContentPresenter cp) continue;
-            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border headCard) continue;
-            if (headCard.ActualWidth <= 0) continue;
+            var st = _controller.StackInfoFor(ow.Hwnd);
+            var stacked = st is { Members.Count: >= 2 };
+            // Reserve the cascade overhang (stacks) or restore the base
+            // margin (dissolved stacks / plain windows). Base margin is
+            // snapshotted once per container so repeated passes compose.
+            if (!_baseContainerMargins.TryGetValue(cp, out var baseMargin))
+                _baseContainerMargins[cp] = baseMargin = cp.Margin;
             var cardW = ow.ThumbWidth + 16;
             var peek = cardW / 2;
+            var extra = stacked ? (st.Members.Count - 1) * peek : 0;
+            var target = new Thickness(baseMargin.Left, baseMargin.Top,
+                baseMargin.Right + extra, baseMargin.Bottom);
+            if (cp.Margin.Right != target.Right)
+            {
+                cp.Margin = target;
+                marginDirty = true;
+            }
+            if (!stacked) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border headCard) continue;
+            if (headCard.ActualWidth <= 0) { pending++; continue; }
             var headTl = headCard.TransformToVisual(DropLayer)
                 .Transform(new Point(0, 0));
             for (var i = 1; i < st.Members.Count; i++)
@@ -1076,9 +1111,29 @@ public partial class SwitcherOverlay : Window
                 if (!_cascadeSubs.TryGetValue(st.Members[i].Hwnd, out var sub)) continue;
                 Canvas.SetLeft(sub, headTl.X + i * peek);
                 Canvas.SetTop(sub, headTl.Y);
+                // Match the head card's height exactly so the folded row
+                // reads as one aligned stack (the 200px default in
+                // BuildCascadeCard is just the pre-layout fallback).
+                if (headCard.ActualHeight > 0) sub.Height = headCard.ActualHeight;
             }
         }
+        // If any head wasn't laid out yet — or a margin change just
+        // re-flowed the WrapPanel — queue another pass at Background
+        // priority (cap at 30 passes).
+        if ((pending > 0 || marginDirty) && _isOpen && !_controller.IsInStackView
+            && _layoutPassesRemaining > 0)
+        {
+            _layoutPassesRemaining--;
+            Dispatcher.BeginInvoke(new Action(LayoutCascades), DispatcherPriority.Background);
+        }
+        // Sub positions feed the DWM destination rects — refresh them once
+        // the layout pass triggered by the Canvas.SetLeft/Top calls above
+        // has actually moved the subs (PointToScreen still returns the OLD
+        // position until layout runs, so this must be queued after it).
+        Dispatcher.BeginInvoke(new Action(UpdateLiveRects), DispatcherPriority.Loaded);
     }
+    private int _layoutPassesRemaining;
+    private readonly Dictionary<ContentPresenter, Thickness> _baseContainerMargins = new();
 
     /// <summary>One overlapped member card: title strip + half-visible
     /// live preview. Plain click = 直达, drag = that member (peel/re-stack).
@@ -1476,41 +1531,57 @@ public partial class SwitcherOverlay : Window
 
     private void RestoreCascadeSub(Border b) => b.Background = DefaultSubBackground;
 
-    /// <summary>Resolve which sub (if any) the cursor sits over, then update
-    /// the single highlighted sub. Called on every RootBorder mouse move so
-    /// hover state is always in sync with cursor position — eliminates the
-    /// stale-highlight bug where sub-A stays blue after the cursor jumps
-    /// to sub-B without WPF firing sub-A's MouseLeave.</summary>
+    /// <summary>Resolve which cascade member (if any) the cursor sits over,
+    /// then update the single highlighted sub. Geometry matches
+    /// LayoutCascades exactly: the cascade spans
+    /// [head.x, head.x + (n-1)·peek + cardW), sub i owns [i·peek, (i+1)·peek)
+    /// and the last member owns the widened tail. Called on every
+    /// RootBorder mouse move so hover state is always in sync — eliminates
+    /// the stale-highlight bug where sub-A stays blue after the cursor
+    /// jumps to sub-B without WPF firing sub-A's MouseLeave.</summary>
     private void UpdateCascadeHoverFromPointer(Point p)
     {
         if (_controller.IsInStackView) { SetCascadeHover(IntPtr.Zero, false); return; }
-        var card = CardAt(p);
-        if (card is null) { SetCascadeHover(IntPtr.Zero, false); return; }
-        var vm = card.DataContext as OverlayWindow;
-        if (vm is null) { SetCascadeHover(IntPtr.Zero, false); return; }
-        var st = _controller.StackInfoFor(vm.Hwnd);
-        if (st is null || st.Members.Count < 2) { SetCascadeHover(IntPtr.Zero, false); return; }
-        var cardPos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
-        var localX = p.X - cardPos.X;
-        // Use the head's natural cascade width (ThumbWidth + 16) — not
-        // card.ActualWidth — because the head template is rendered at the
-        // head's own cardW and the sub geometry is computed in that
-        // coordinate space (subs are positioned by LayoutCascades at
-        // i*peek from the head's screen origin).
-        var cardW = vm.ThumbWidth + 16;
-        var peek = cardW / 2;
-        var target = st.Members[0].Hwnd; // head: the leftmost exposed patch
-        for (var i = 1; i < st.Members.Count; i++)
+        foreach (var ow in _windows)
         {
-            var sStart = i * peek;
-            var sEnd = sStart + peek;
-            if (localX >= sStart && localX < sEnd)
+            if (_controller.StackInfoFor(ow.Hwnd) is not { } st
+                || st.Members.Count < 2) continue;
+            if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
+                is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border headCard) continue;
+            if (headCard.ActualWidth <= 0) continue;
+            var tl = headCard.TransformToVisual(WindowsList)
+                .Transform(new Point(0, 0));
+            var cardW = ow.ThumbWidth + 16;
+            var peek = cardW / 2;
+            var spanX = (st.Members.Count - 1) * peek + cardW;
+            if (p.X < tl.X || p.X >= tl.X + spanX
+                || p.Y < tl.Y || p.Y > tl.Y + headCard.ActualHeight) continue;
+            var localX = p.X - tl.X;
+            var target = st.Members[0].Hwnd; // head: the leftmost exposed patch
+            for (var i = 1; i < st.Members.Count; i++)
             {
-                target = st.Members[i].Hwnd;
-                break;
+                var sStart = i * peek;
+                var sEnd = i == st.Members.Count - 1 ? spanX : sStart + peek;
+                if (localX >= sStart && localX < sEnd)
+                {
+                    target = st.Members[i].Hwnd;
+                    break;
+                }
             }
+            if (target == st.Members[0].Hwnd)
+            {
+                // Back on the head patch: clear any lit sub, but leave the
+                // whole-stack outline alone — OnHeadHoverEnter/Leave owns it.
+                SetCascadeHover(IntPtr.Zero, false);
+            }
+            else
+            {
+                SetCascadeHover(target, true);
+            }
+            return;
         }
-        SetCascadeHover(target, true);
+        SetCascadeHover(IntPtr.Zero, false);
     }
 
     /// <summary>Hover on the head's exposed top-left patch. That patch is

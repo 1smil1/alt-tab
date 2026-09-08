@@ -301,18 +301,23 @@
             <!-- Drag feedback layer (拖拽动效): insertion line for
                  左/右 zones, glow outline for 里面 (集中), peel chip
                  while dragging a member out of its stack. -->
+            <!-- Hit-testable so cascade sub-cards (added in code) receive
+                 clicks/drags directly; the canvas itself has no Background
+                 so empty areas still pass through. Decorative children
+                 opt out individually. -->
             <Canvas x:Name="DropLayer"
-                    Grid.Row="1"
-                    IsHitTestVisible="False">
+                    Grid.Row="1">
                 <Rectangle x:Name="LineIndicator"
                            Width="4"
                            RadiusX="2" RadiusY="2"
                            Fill="#FF0078D4"
+                           IsHitTestVisible="False"
                            Visibility="Collapsed"/>
                 <Border x:Name="PeelChip"
                         Background="#FF0078D4"
                         CornerRadius="8"
                         Padding="8,3"
+                        IsHitTestVisible="False"
                         Visibility="Collapsed">
                     <TextBlock Text="剥离"
                                FontSize="11"
