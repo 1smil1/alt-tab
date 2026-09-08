@@ -76,7 +76,9 @@ public sealed class PinDefinition
 /// <summary>One card in the overlay: the live window plus its computed
 /// slot. Slot 0 = special most-recent, 1..10 = managed, -1 = unmanaged
 /// (no badge). IsPinned mirrors the persisted pin that matched.
-/// IsCurrentCopy = 当前窗口的复制卡 (Windows Alt+Tab 左起第一张): badge
-/// 显示真实编号, 不参与数字寻址/导出/拖拽 — 真实卡仍在原位。</summary>
+/// IsCurrentCopy = 当前窗口卡 (Windows Alt+Tab 左起第一张 = 你刚离开的
+/// 窗口): 恒占 index 0, Slot=-2 → 无数字 badge. 纯展示卡 — 不参与数字
+/// 寻址/导出/拖拽/cascade. fg 同时是 pin 卡时双卡并存: 真实卡留在编号区
+/// (Alt+数字 直达它 = 激活当前窗口, 无害)。</summary>
 public sealed record SlotWindow(WindowEntry Entry, int Slot, bool IsPinned,
     bool IsCurrentCopy = false);

@@ -112,6 +112,15 @@ public sealed class SwitcherController
     /// <summary>Templates and sort methods from config.json (右上角 UI 的数据源).</summary>
     public ConfigFile Config => _config;
 
+    /// <summary>设置窗口保存后重载 config.json — 模板/排序下拉与热键字段
+    /// 即时生效. Stacks 归 controller 独占维护, Load 拿回的就是最新.</summary>
+    public void ReloadConfig()
+    {
+        if (_configStore is null) return;
+        _config = _configStore.Load();
+        WindowSwitcherWpf.Services.Log.Info("Controller", "config reloaded (settings saved)");
+    }
+
     public void OpenOverlay()
     {
         // Capture the window being left BEFORE the overlay takes focus —
@@ -190,30 +199,20 @@ public sealed class SwitcherController
             };
         }
 
-        var cards = AssignSlots(mru, _order.Pins, _activeSortRules);
-        // 当前窗口复制卡 (Windows Alt+Tab 左起第一张): badge = 真实编号,
-        // 真实卡留在原位. 0 号卡 (上个窗口) 紧随其后 — 预选/快速松开的
-        // 提交目标. 复制卡不参与数字寻址/导出/拖拽 (SelectByDigit /
-        // ExportCurrentAsTemplate / CanDrag 各自跳过).
-        if (foreground != IntPtr.Zero)
-        {
-            var fi = cards.FindIndex(s => s.Entry.Hwnd == foreground);
-            if (fi > 0) // 已在首位说明没有"上个窗口"可切 — 不插复制卡
-            {
-                var f = cards[fi];
-                cards = new List<SlotWindow> { f with { IsCurrentCopy = true } }
-                    .Concat(cards.Where((_, i) => i != fi))
-                    .ToList();
-            }
-        }
+        var cards = AssignSlots(mru, _order.Pins, _activeSortRules, foreground);
+        // 当前窗口卡 (Slot=-2 复制卡) 与 Slot 0 (上一个窗口) 由 AssignSlots
+        // 统一插入 — 复制卡不参与数字寻址/导出/拖拽/cascade (SelectByDigit /
+        // ExportCurrentAsTemplate / CanDrag 各自跳过), Slot 0 卡不可拖拽.
         Slotted = cards;
         _flat = Slotted.Select(s => s.Entry).ToList();
         // Diagnostics: duplicate hwnds in the flat list break the cascade
         // build (two head cards share one stack → orphaned sub cards).
-        var dupGroups = _flat.GroupBy(w => w.Hwnd).Where(g => g.Count() > 1).ToList();
+        // 当前窗口复制卡与它的真实卡同 hwnd 是设计内的双卡 — 不算 dup.
+        var dupGroups = Slotted.Where(s => !s.IsCurrentCopy)
+            .GroupBy(w => w.Entry.Hwnd).Where(g => g.Count() > 1).ToList();
         foreach (var g in dupGroups)
             WindowSwitcherWpf.Services.Log.Info("Controller",
-                $"duplicate hwnd in flat: 0x{g.Key.ToInt64():X} x{g.Count()} '{g.First().Title}'");
+                $"duplicate hwnd in flat: 0x{g.Key.ToInt64():X} x{g.Count()} '{g.First().Entry.Title}'");
         foreach (var sw in Slotted)
         {
             if (_stacksByHead.TryGetValue(sw.Entry.Hwnd, out var info))
@@ -315,13 +314,30 @@ public sealed class SwitcherController
     /// vacant number (MoveRelative).
     /// </summary>
     public static List<SlotWindow> AssignSlots(List<WindowEntry> mru, List<PinDefinition> pins,
-        IReadOnlyList<SortRule>? sortRules = null)
+        IReadOnlyList<SortRule>? sortRules = null, IntPtr foreground = default)
     {
         var result = new List<SlotWindow>(mru.Count);
         if (mru.Count == 0) return result;
 
-        result.Add(new SlotWindow(mru[0], 0, false));
-        var rest = mru.Skip(1).ToList();
+        // 当前窗口卡 (Windows Alt+Tab 左起第一张 = 你刚离开的窗口): 恒占
+        // index 0, Slot=-2 → badge 不显示数字. 真实卡保留在编号区 — pin 卡
+        // 双卡并存 (Alt+数字直达真实卡 = 激活当前窗口, 无害).
+        var fi = foreground != default ? mru.FindIndex(w => w.Hwnd == foreground) : -1;
+        if (fi >= 0)
+            result.Add(new SlotWindow(mru[fi], -2, false) { IsCurrentCopy = true });
+
+        // Slot 0 = 上一个窗口 = MRU 序列里 fg 之外的第一个 (quick tap 松开
+        // 的提交目标). fg==mru[0] 时它就是 mru[1] — 0 号恒存在.
+        var slot0 = -1;
+        for (var i = 0; i < mru.Count; i++)
+            if (i != fi) { slot0 = i; break; }
+        if (slot0 < 0) return result; // 屏幕上只有 fg 一个窗口
+
+        result.Add(new SlotWindow(mru[slot0], 0, false));
+        // 编号区候选 = mru 除 slot0 卡外的全部 (含 fg 真实卡 — pin 认领
+        // 依赖它, 双卡并存的关键). 不可拖拽: -2 复制卡 CanDrag 拒绝,
+        // Slot 0 卡 MoveRelative 拒绝.
+        var rest = mru.Where((w, i) => i != slot0).ToList();
 
         // 1. Pins hard-claim their numbers (模板/手动固定 tier — both are pins;
         // smart sort NEVER moves them).
@@ -654,6 +670,7 @@ public sealed class SwitcherController
         var next = 1;
         foreach (var s in ordered)
         {
+            if (s.IsCurrentCopy) { result.Add(s); continue; } // 当前窗口卡: Slot=-2 恒不变
             if (s.Slot == 0 || s.IsPinned)
             {
                 result.Add(s);
