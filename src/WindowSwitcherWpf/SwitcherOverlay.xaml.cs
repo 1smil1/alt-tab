@@ -971,11 +971,13 @@ public partial class SwitcherOverlay : Window
             var last = i == n - 1;
             // Visible width: full for the last card, half otherwise.
             var visW = last ? width : width / 2;
-            // Skip the sub's WPF title strip at the top so the DWM
-            // thumbnail doesn't paint over the title text.
-            const double subTitleHeight = 32;
-            double thumbTop = tl.Y - origin.Y + subTitleHeight;
-            double thumbHeight = height - subTitleHeight;
+            // Subs' el spans the whole card INCLUDING its WPF title strip —
+            // shift the DWM rect below it so the preview doesn't paint over
+            // the title text. The head's el is the bare thumb area (the
+            // title strip lives outside it), so no shift there.
+            var srcTop = i == 0 ? 0 : 32;
+            double thumbTop = tl.Y - origin.Y + srcTop;
+            double thumbHeight = height - srcTop;
             var flags = NativeMethods.DWM_TNP_RECTDESTINATION
                         | NativeMethods.DWM_TNP_VISIBLE;
             var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
@@ -997,10 +999,36 @@ public partial class SwitcherOverlay : Window
             }
             else
             {
-                // Source = left half of the client area, same aspect as the
-                // visible half — a true "half window" preview.
-                flags |= NativeMethods.DWM_TNP_RECTSOURCE;
+                // Source = left half of the CLIENT area. SOURCECLIENTAREA
+                // makes rcSource client-relative; without it DWM read the
+                // rect as window-relative and rendered nothing.
+                flags |= NativeMethods.DWM_TNP_RECTSOURCE
+                       | NativeMethods.DWM_TNP_SOURCECLIENTAREA;
+                props.fSourceClientAreaOnly = true;
                 NativeMethods.GetClientRect(m.Hwnd, out var crc);
+                if (crc.Right - crc.Left < 50 || crc.Bottom - crc.Top < 50)
+                {
+                    // Minimized: the client rect degenerates to 0x0, and an
+                    // empty rcSource makes DWM paint nothing (blank peek).
+                    // The danced surface keeps its RESTORED size, whose
+                    // dimensions live in rcNormalPosition even while iconic.
+                    var wp = new NativeMethods.WINDOWPLACEMENT
+                    {
+                        length = (uint)System.Runtime.InteropServices.Marshal
+                            .SizeOf<NativeMethods.WINDOWPLACEMENT>(),
+                    };
+                    if (NativeMethods.GetWindowPlacement(m.Hwnd, ref wp))
+                    {
+                        var nr = wp.rcNormalPosition;
+                        crc = new NativeMethods.RECT
+                        {
+                            Left = 0,
+                            Top = 0,
+                            Right = nr.Right - nr.Left,
+                            Bottom = nr.Bottom - nr.Top,
+                        };
+                    }
+                }
                 props.rcSource = new NativeMethods.RECT
                 {
                     Left = 0,

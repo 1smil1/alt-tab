@@ -176,6 +176,23 @@ public static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool GetClientRect(IntPtr hwnd, out RECT lpRect);
 
+    // Minimized windows report a 0x0 client rect, which would make the
+    // DWM rcSource empty (blank peek). rcNormalPosition carries the
+    // restored size even while iconic.
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowPlacement(IntPtr hwnd, ref WINDOWPLACEMENT lpwndpl);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT
+    {
+        public uint length;
+        public uint flags;
+        public uint showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 
