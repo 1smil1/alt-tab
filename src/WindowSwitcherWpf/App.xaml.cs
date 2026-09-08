@@ -82,6 +82,13 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Length > 0 && e.Args[0] == "--test-stack")
+        {
+            RunStackTests();
+            Shutdown();
+            return;
+        }
+
         if (e.Args.Length > 0 && e.Args[0] == "--show-overlay")
         {
             // Test mode: open the overlay immediately so a scripted screen
@@ -94,6 +101,21 @@ public partial class App : Application
                 hwnd => ActivationService.Activate(hwnd), configStore);
             _overlay = new SwitcherOverlay(_controller);
             _overlay.ShowAndFocus();
+            // Self-test: --enter-stack N jumps straight into the Nth live
+            // stack's sub view so a scripted screenshot can verify it.
+            var enterIdx = Array.IndexOf(e.Args, "--enter-stack");
+            if (enterIdx >= 0)
+            {
+                var heads = _controller.StackHeads();
+                var pick = enterIdx + 1 < e.Args.Length && int.TryParse(e.Args[enterIdx + 1], out var n)
+                    ? Math.Clamp(n, 0, Math.Max(0, heads.Count - 1))
+                    : 0;
+                if (heads.Count > 0)
+                {
+                    _controller.EnterStackView(heads[pick]);
+                    _overlay.TestRebuild();
+                }
+            }
             return;
         }
 
@@ -121,6 +143,7 @@ public partial class App : Application
         _keyboard.OverlayDigit += d => _overlay?.SelectSlotAndCommit(d);
         _keyboard.OverlayCommit += OnOverlayCommit;
         _keyboard.OverlayCancel += OnOverlayCancel;
+        _keyboard.OverlayEscape += OnOverlayEscape;
         _keyboard.EscapePressed += () => _overlay?.Cancel();
         _keyboard.Install();
 
@@ -155,6 +178,19 @@ public partial class App : Application
         Log.Info("App", "OnOverlayCancel");
         _overlay?.Cancel();
         _keyboard?.SetOverlayOpen(false);
+    }
+
+    private void OnOverlayEscape()
+    {
+        // Esc in the stack sub view just steps back to the main page; the
+        // overlay stays open and Alt stays armed.
+        if (_overlay is { IsInStackView: true })
+        {
+            Log.Info("App", "OnOverlayEscape: leave stack sub view");
+            _overlay.ExitStackView();
+            return;
+        }
+        OnOverlayCancel();
     }
 
     private void RunDebugEnum()
@@ -266,6 +302,128 @@ public partial class App : Application
             string.Join(',', s8.Select(x => x.Slot)));
 
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
+        Environment.Exit(0);
+    }
+
+    /// <summary>
+    /// Self-test for the manual stacking cores (自定义集中/剥离). Run via
+    /// <c>WindowSwitcherWpf.exe --test-stack</c>; prints PASS/FAIL lines.
+    /// Exercises the pure StackDropCore/PeelCore rules — no real config.
+    /// </summary>
+    private void RunStackTests()
+    {
+        static WindowEntry W(string title) =>
+            new(new IntPtr(title.GetHashCode() & 0xFFFFFF), title, "app.exe",
+                @"C:\apps\app.exe", "group:" + title, false);
+
+        static void Check(string name, bool ok, string detail = "")
+        {
+            var line = $"{(ok ? "PASS" : "FAIL")} {name}{(detail.Length > 0 ? " | " + detail : "")}";
+            Console.WriteLine(line);
+            WindowSwitcherWpf.Services.Log.Info("StackTests", line);
+            Console.Out.Flush();
+        }
+
+        static string Dump(List<StackDefinition> defs) =>
+            string.Join(" | ", defs.Select(d =>
+                (d.Id.Length <= 6 ? d.Id : d.Id[..6]) + ":" + string.Join(",", d.Members.Select(m => m.Title))));
+
+        // 1. Lone + lone, dropped after (中心/右半): target becomes head.
+        var defs1 = new List<StackDefinition>();
+        var ok1 = SwitcherController.StackDropCore(defs1, W("a2"), W("a1"), before: false);
+        Check("new-stack-head-is-target",
+            ok1 && defs1.Count == 1 && defs1[0].Members[0].Title == "a1"
+            && defs1[0].Members[1].Title == "a2",
+            Dump(defs1));
+
+        // 2. Lone + lone, dropped before (左半): dragged becomes head.
+        var defs2 = new List<StackDefinition>();
+        SwitcherController.StackDropCore(defs2, W("a2"), W("a1"), before: true);
+        Check("new-stack-before-head-is-drag",
+            defs2[0].Members[0].Title == "a2" && defs2[0].Members[1].Title == "a1",
+            Dump(defs2));
+
+        // 3. Same-stack reorder: moving a member before another one.
+        var defs3 = new List<StackDefinition>
+        {
+            new() { Members = new() { M("a1"), M("a2"), M("a3") } },
+        };
+        var ok3 = SwitcherController.StackDropCore(defs3, W("a3"), W("a1"), before: true);
+        Check("same-stack-reorder",
+            ok3 && string.Join(",", defs3[0].Members.Select(m => m.Title)) == "a3,a1,a2",
+            Dump(defs3));
+
+        // 4. Same-stack no-ops: head drag inside its own stack, adjacent move.
+        var defs4 = new List<StackDefinition>
+        {
+            new() { Members = new() { M("a1"), M("a2") } },
+        };
+        var ok4a = SwitcherController.StackDropCore(defs4, W("a1"), W("a2"), before: false);
+        var ok4b = SwitcherController.StackDropCore(defs4, W("a2"), W("a1"), before: false);
+        Check("same-stack-noop", !ok4a && !ok4b, Dump(defs4));
+
+        // 5. Head drag carries the WHOLE stack onto a lone target.
+        var defs5 = new List<StackDefinition>
+        {
+            new() { Id = "s1", Members = new() { M("a1"), M("a2") } },
+        };
+        SwitcherController.StackDropCore(defs5, W("a1"), W("x"), before: false);
+        Check("head-carries-whole-stack",
+            defs5.Count == 1 && defs5[0].Id == "s1"
+            && string.Join(",", defs5[0].Members.Select(m => m.Title)) == "x,a1,a2",
+            Dump(defs5));
+
+        // 6. Non-head member dragged onto a lone card: detaches, origin
+        //    dissolves (1 member left), new 2-stack forms.
+        var defs6 = new List<StackDefinition>
+        {
+            new() { Id = "s1", Members = new() { M("a1"), M("a2") } },
+        };
+        SwitcherController.StackDropCore(defs6, W("a2"), W("x"), before: false);
+        Check("member-detach-origin-dissolves",
+            defs6.Count == 1 && defs6[0].Members[0].Title == "x"
+            && defs6[0].Members[1].Title == "a2",
+            Dump(defs6));
+
+        // 7. Member joins ANOTHER stack at the target member's position.
+        var defs7 = new List<StackDefinition>
+        {
+            new() { Id = "s1", Members = new() { M("a1"), M("a2") } },
+            new() { Id = "s2", Members = new() { M("b1"), M("b2") } },
+        };
+        SwitcherController.StackDropCore(defs7, W("a2"), W("b1"), before: false);
+        Check("member-joins-other-stack",
+            defs7.Count == 1 && defs7[0].Id == "s2"
+            && string.Join(",", defs7[0].Members.Select(m => m.Title)) == "b1,a2,b2",
+            Dump(defs7));
+
+        // 8. Peel down to 1 member → stack dissolves (散开).
+        var defs8 = new List<StackDefinition>
+        {
+            new() { Members = new() { M("a1"), M("a2") } },
+        };
+        SwitcherController.PeelCore(defs8, W("a2"));
+        Check("peel-dissolves-at-one", defs8.Count == 0, Dump(defs8));
+
+        // 9. Peel of a lone (unstacked) window is a no-op.
+        var defs9 = new List<StackDefinition>();
+        Check("peel-lone-noop", !SwitcherController.PeelCore(defs9, W("a1")));
+
+        // 10. Identity rule: same Title but different GroupKey never matches.
+        var wA = W("doc");
+        var wB = new WindowEntry(new IntPtr(7), "doc", "other.exe",
+            @"C:\other.exe", "group:other", false);
+        var defs10 = new List<StackDefinition>
+        {
+            new() { Members = new() { M("doc") } },
+        };
+        Check("identity-is-groupkey-plus-title", !SwitcherController.PeelCore(defs10, wB) && wA.GroupKey != wB.GroupKey);
+
+        static StackMemberDef M(string title) =>
+            new() { GroupKey = "group:" + title, Title = title };
+
+        WindowSwitcherWpf.Services.Log.Info("StackTests", "done");
+        Console.WriteLine("done");
         Environment.Exit(0);
     }
 

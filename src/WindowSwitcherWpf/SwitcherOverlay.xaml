@@ -30,9 +30,39 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
+            <!-- Sub view banner (子标签页面): stack title + member count +
+                 gesture hints; replaces the main header while active. -->
+            <StackPanel x:Name="StackHeader"
+                        Grid.Row="0"
+                        HorizontalAlignment="Left"
+                        Orientation="Horizontal"
+                        Visibility="Collapsed"
+                        Margin="0,0,0,10">
+                <TextBlock Text="🗂"
+                           FontSize="14"
+                           VerticalAlignment="Center"
+                           Margin="0,0,6,0"/>
+                <TextBlock x:Name="StackTitleText"
+                           FontSize="14"
+                           FontWeight="Bold"
+                           Foreground="#FF202020"
+                           VerticalAlignment="Center"/>
+                <TextBlock x:Name="StackCountText"
+                           FontSize="13"
+                           FontWeight="Bold"
+                           Foreground="#FF0078D4"
+                           VerticalAlignment="Center"
+                           Margin="6,0,0,0"/>
+                <TextBlock Text="  → ← / Alt+` 切换 · 数字跳成员 · Esc 返回主页面 · 拖出网格外=剥离"
+                           FontSize="11"
+                           Foreground="#FF6A6A6A"
+                           VerticalAlignment="Center"
+                           Margin="10,0,0,0"/>
+            </StackPanel>
             <!-- Header (右上角): template picker, smart-sort picker + apply,
                  export — all data from the exe-adjacent config.json. -->
-            <StackPanel Grid.Row="0"
+            <StackPanel x:Name="MainHeader"
+                        Grid.Row="0"
                         HorizontalAlignment="Right"
                         Orientation="Horizontal"
                         Margin="0,0,0,10">
@@ -113,15 +143,48 @@
                                 </Style>
                             </Border.Style>
                             <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <!-- Fan-strip column (堆叠侧边条): the
+                                         layered members behind the face
+                                         card; zero width for lone cards. -->
+                                    <ColumnDefinition Width="{Binding StackEdgeWidth}"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
                                 <!-- Group accent strip: 3px hue line at the
                                      card top; brightens when any card of
                                      the same app group is hovered. -->
                                 <Rectangle Height="3"
+                                           Grid.Column="1"
                                            VerticalAlignment="Top"
                                            Margin="14,3,14,0"
                                            RadiusX="1.5" RadiusY="1.5"
                                            Fill="{Binding GroupStripBrush}"/>
-                            <StackPanel>
+                                <!-- Fan strips: each stands for one member
+                                     behind the face (click = 直达, drag out
+                                     = 剥离). -->
+                                <ItemsControl Grid.Column="0"
+                                              ItemsSource="{Binding FanStrips}"
+                                              VerticalAlignment="Stretch"
+                                              Focusable="False">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{Binding Tint}"
+                                                    Width="11"
+                                                    Margin="0,6,1,6"
+                                                    CornerRadius="4,0,0,4"
+                                                    Cursor="Hand"
+                                                    MouseLeftButtonDown="OnStripMouseDown"
+                                                    MouseLeftButtonUp="OnStripMouseUp"
+                                                    ToolTip="点击直达此窗口 · 拖出=剥离"/>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            <StackPanel Grid.Column="1">
                                 <Grid Margin="8,7,8,7">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
                                         <!-- Slot number badge sits top-left, in
@@ -136,6 +199,21 @@
                                                 Visibility="{Binding BadgeVisibility}"
                                                 ToolTip="Alt+数字 直达此标签">
                                             <TextBlock Text="{Binding SlotBadge}"
+                                                       FontSize="10"
+                                                       FontWeight="Bold"
+                                                       Foreground="#FF5A5A5A"
+                                                       Margin="4,1"/>
+                                        </Border>
+                                        <!-- Stack member count: ×N badge right
+                                             after the slot digit (堆叠共用一
+                                             个数字, N = 成员数). -->
+                                        <Border Background="{Binding GroupBadgeBrush}"
+                                                CornerRadius="4"
+                                                Margin="0,0,5,0"
+                                                VerticalAlignment="Center"
+                                                Visibility="{Binding StackBadgeVisibility}"
+                                                ToolTip="堆叠: Alt+数字 进子页面">
+                                            <TextBlock Text="{Binding StackBadge}"
                                                        FontSize="10"
                                                        FontWeight="Bold"
                                                        Foreground="#FF5A5A5A"

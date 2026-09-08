@@ -23,6 +23,10 @@ public sealed class KeyboardHook : IDisposable
     public event Action<int>? OverlayDigit;
     public event Action? OverlayCommit;
     public event Action? OverlayCancel;
+    /// <summary>Esc while the overlay is open. The subscriber decides what
+    /// it means: leaving a stack sub view (子标签页面 → 主页面) or closing
+    /// the overlay — the hook itself has no view state.</summary>
+    public event Action? OverlayEscape;
     public event Action? EscapePressed;
 
     public uint TriggerVirtualKey { get; set; } = 0xC0; // VK_OEM_3 = backtick
@@ -104,8 +108,17 @@ public sealed class KeyboardHook : IDisposable
             }
             if (vk == 0x1B)
             {
-                if (_overlayOpen) { _overlayOpen = false; Log.Info("KeyboardHook", "fire OverlayCancel"); Fire(OverlayCancel); }
-                Fire(EscapePressed);
+                if (_overlayOpen)
+                {
+                    // Esc first leaves a stack sub view; the app decides
+                    // (overlay still open afterwards).
+                    Log.Info("KeyboardHook", "fire OverlayEscape");
+                    Fire(OverlayEscape);
+                }
+                else
+                {
+                    Fire(EscapePressed);
+                }
                 return new IntPtr(1);
             }
             if (_overlayOpen)

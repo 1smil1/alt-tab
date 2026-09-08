@@ -282,51 +282,152 @@ public partial class SwitcherOverlay : Window
         WindowSwitcherWpf.Services.Log.Info("Overlay", $"export '{name}' slots={n}");
     }
 
-    /// <summary>Alt+数字 quick jump: select the slot with that badge and
-    /// activate it immediately (快速打开这个标签).</summary>
-    public void SelectSlotAndCommit(int digit)
-    {
-        if (!_isOpen) return;
-        _controller.SelectByDigit(digit);
-        RebuildSelection();
-        Commit();
-    }
-
     /// <summary>Re-renders the card list from the controller's slot model
     /// (pins + flow + drag result). Slot 0 = most recent, 1..10 managed,
     /// -1 unmanaged (no badge). Pin toggles and drags rebuild with the
-    /// scroll position kept so the card doesn't jump under the cursor.</summary>
+    /// scroll position kept so the card doesn't jump under the cursor.
+    /// In the stack sub view (子标签页面) it renders the stack's members
+    /// in relative order instead.</summary>
     private void RebuildFromSlots(bool preserveScroll)
     {
         var offset = preserveScroll ? Scroller.VerticalOffset : 0.0;
         _windows.Clear();
-        foreach (var sw in _controller.Slotted)
+        if (_controller.IsInStackView)
         {
-            var ow = new OverlayWindow(sw.Entry, sw.Entry.GroupKey, 0)
+            var info = _controller.ActiveStackInfo!;
+            foreach (var m in info.Members)
             {
-                SlotBadge = sw.Slot >= 0 ? sw.Slot.ToString() : "",
-                IsPinned = sw.IsPinned,
-            };
-            var cached = LookupCache(ow.Hwnd);
-            if (cached is not null)
-            {
-                ow.Thumbnail = cached.Thumb;
-                ow.Icon = cached.Icon;
+                var ow = new OverlayWindow(m, m.GroupKey, 0)
+                {
+                    // Shared slot digit (共用一个标签数字); relative member
+                    // numbers exist but are deliberately not displayed.
+                    SlotBadge = info.Slot >= 0 ? info.Slot.ToString() : "",
+                };
+                var cached = LookupCache(ow.Hwnd);
+                if (cached is not null)
+                {
+                    ow.Thumbnail = cached.Thumb;
+                    ow.Icon = cached.Icon;
+                }
+                _windows.Add(ow);
             }
-            _windows.Add(ow);
         }
-        WindowSwitcherWpf.Services.Log.Info("Overlay", $"rebuild windows={_windows.Count}");
+        else
+        {
+            foreach (var sw in _controller.Slotted)
+            {
+                var ow = new OverlayWindow(sw.Entry, sw.Entry.GroupKey, 0)
+                {
+                    SlotBadge = sw.Slot >= 0 ? sw.Slot.ToString() : "",
+                    IsPinned = sw.IsPinned,
+                };
+                var st = _controller.StackInfoFor(sw.Entry.Hwnd);
+                if (st is not null) ow.StackCount = st.Members.Count;
+                var cached = LookupCache(ow.Hwnd);
+                if (cached is not null)
+                {
+                    ow.Thumbnail = cached.Thumb;
+                    ow.Icon = cached.Icon;
+                }
+                _windows.Add(ow);
+            }
+        }
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"rebuild windows={_windows.Count} stackView={_controller.IsInStackView}");
         AssignGroupAccents();
+        // Fan strips borrow the head's group accent, so they are built
+        // after AssignGroupAccents filled the map.
+        if (!_controller.IsInStackView)
+        {
+            foreach (var ow in _windows)
+            {
+                var st = _controller.StackInfoFor(ow.Hwnd);
+                if (st is null || ow.StackCount < 2) continue;
+                var accent = _accentMap.TryGetValue(ow.GroupKey, out var c)
+                    ? c
+                    : System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A);
+                ow.BuildFanStrips(st.Members.Skip(1).Select(x => x.Hwnd), accent);
+            }
+        }
         // Thumbnail capture happens via _thumbTimer, NEVER in Rebuild,
         // otherwise 113 PrintWindow calls block the dispatcher for ~2s
         // and the user releases Alt before the window is shown.
         RebuildSelection();
         RefreshThumbnails();
+        // The visible card set changes when a stack sub view opens/closes,
+        // so the DWM registrations follow it; same-set rebuilds (pin drag)
+        // skip the churn to avoid flicker.
+        if (_isOpen)
+        {
+            var desired = _windows.Select(w => w.Hwnd).ToHashSet();
+            if (!_liveThumbs.Keys.ToHashSet().SetEquals(desired))
+                Dispatcher.BeginInvoke(new Action(RegisterLiveThumbnails), DispatcherPriority.Loaded);
+            Dispatcher.BeginInvoke(new Action(UpdateLiveRects), DispatcherPriority.Loaded);
+        }
         Dispatcher.BeginInvoke(new Action(LogCardRects), DispatcherPriority.Loaded);
+        UpdateHeaderForView();
+        // View switches (主↔子页面) change the content size drastically —
+        // re-measure and re-center so the sub view doesn't sit in a huge
+        // main-page-sized panel. Pin drags (preserveScroll) keep geometry.
+        if (_isOpen && !preserveScroll && IsLoaded)
+            CenterOnCursorMonitor();
         if (preserveScroll)
             Dispatcher.BeginInvoke(() => Scroller.ScrollToVerticalOffset(offset),
                 DispatcherPriority.Loaded);
     }
+
+    /// <summary>Main page header (模板/排序) vs sub view header (堆叠标题 +
+    /// 操作提示) — only one is visible at a time.</summary>
+    private void UpdateHeaderForView()
+    {
+        var sub = _controller.IsInStackView;
+        MainHeader.Visibility = sub ? Visibility.Collapsed : Visibility.Visible;
+        StackHeader.Visibility = sub ? Visibility.Visible : Visibility.Collapsed;
+        if (!sub) return;
+        var info = _controller.ActiveStackInfo!;
+        StackTitleText.Text = info.Head.DisplayTitle;
+        StackCountText.Text = "×" + info.Members.Count;
+    }
+
+    /// <summary>Alt+数字 quick jump: select the slot with that badge and
+    /// activate it immediately (快速打开这个标签). A digit pointing at a
+    /// STACK opens the 子标签页面 instead — Alt release commits, arrows and
+    /// (hidden) relative digits move within the stack.</summary>
+    public void SelectSlotAndCommit(int digit)
+    {
+        if (!_isOpen) return;
+        if (_controller.IsInStackView)
+        {
+            // Relative member index (相对数字不显示但有效): Alt+2 = 第2个成员.
+            _controller.SelectByDigit(digit);
+            RebuildSelection();
+            return; // still navigating — Alt release commits the member
+        }
+        if (!_controller.SelectByDigit(digit)) return;
+        RebuildSelection();
+        var entry = _controller.Flat[Math.Min(_controller.ActiveFlatIndex, _controller.Flat.Count - 1)];
+        if (_controller.StackInfoFor(entry.Hwnd) is not null)
+        {
+            _controller.EnterStackView(entry.Hwnd);
+            RebuildFromSlots(preserveScroll: false);
+            return;
+        }
+        Commit();
+    }
+
+    public bool IsInStackView => _controller.IsInStackView;
+
+    /// <summary>Esc from the sub view: back to the main page (堆叠不解散).</summary>
+    public void ExitStackView()
+    {
+        if (!_controller.IsInStackView) return;
+        _controller.ExitStackView();
+        RebuildFromSlots(preserveScroll: false);
+    }
+
+    /// <summary>Self-test hook: force a re-render from the current
+    /// controller state (--show-overlay --enter-stack N screenshot flow).</summary>
+    public void TestRebuild() => RebuildFromSlots(preserveScroll: false);
 
     // Ground truth for scripted self-tests: the physical screen rect of
     // every card, so synthetic clicks can target pins without pixel
@@ -375,17 +476,21 @@ public partial class SwitcherOverlay : Window
 
     private void AssignGroupAccents()
     {
-        var map = new System.Collections.Generic.Dictionary<string, System.Windows.Media.Color>();
+        _accentMap.Clear();
         foreach (var w in _windows)
         {
-            if (!map.TryGetValue(w.GroupKey, out var color))
+            if (!_accentMap.TryGetValue(w.GroupKey, out var color))
             {
                 color = GroupPalette[Fnv1a(w.GroupKey) % (uint)GroupPalette.Length];
-                map[w.GroupKey] = color;
+                _accentMap[w.GroupKey] = color;
             }
             w.SetGroupAccent(color);
         }
     }
+
+    // Last accent map from AssignGroupAccents — fan strips read the head's
+    // color from here.
+    private readonly System.Collections.Generic.Dictionary<string, System.Windows.Media.Color> _accentMap = new();
 
     // 悬停联动: light up every card of the hovered card's group so
     // related windows are findable without any layout shift.
@@ -412,8 +517,8 @@ public partial class SwitcherOverlay : Window
     {
         for (var i = 0; i < _windows.Count; i++)
             _windows[i].IsSelected = false;
-        if (_controller.Flat.Count == 0) return;
-        var entry = _controller.Flat[Math.Min(_controller.ActiveFlatIndex, _controller.Flat.Count - 1)];
+        if (_controller.Nav.Count == 0) return;
+        var entry = _controller.Nav[Math.Min(_controller.ActiveFlatIndex, _controller.Nav.Count - 1)];
         for (var i = 0; i < _windows.Count; i++)
         {
             if (_windows[i].Hwnd == entry.Hwnd) { _windows[i].IsSelected = true; break; }
@@ -440,7 +545,7 @@ public partial class SwitcherOverlay : Window
     /// left/right = ±1 card, up/down = ±(cards per row), wrapping.</summary>
     public void NavigateArrow(int vk)
     {
-        var n = _controller.Flat.Count;
+        var n = _controller.Nav.Count;
         if (n == 0) return;
         var idx = _controller.ActiveFlatIndex;
         switch (vk)
@@ -820,17 +925,33 @@ public partial class SwitcherOverlay : Window
             WindowSwitcherWpf.Services.Log.Info("CardEvent",
                 $"cardclick '{ow0.Title}' dragActive={_dragActive}");
         var wasDrag = _dragActive;
-        var dragged = _dragItem;
+        var dragHwnd = _dragHwnd;
+        var fromStrip = _dragFromFanStrip;
         EndDrag();
-        if (wasDrag && dragged is not null)
+        if (wasDrag && dragHwnd != IntPtr.Zero
+            && sender is FrameworkElement fe && fe.DataContext is OverlayWindow target)
         {
-            // Drop: insert relative to the card under the cursor, side by
-            // which half of the target the release point is in.
-            if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow target)
+            if (target.Hwnd != dragHwnd)
             {
                 var p = e.GetPosition(fe);
-                var before = p.X < fe.ActualWidth / 2;
-                _controller.MoveRelative(dragged.Hwnd, target.Hwnd, before);
+                if (fromStrip)
+                {
+                    // A fan edge carries just that member: dropping it on
+                    // any card joins that card's stack (集中/换组).
+                    _controller.StackDrop(dragHwnd, target.Hwnd, before: p.X < fe.ActualWidth / 2);
+                }
+                else
+                {
+                    // Zones: outer 25% bands = 排序 (before/after), middle
+                    // = 集中 (drop onto the card → stack).
+                    var rel = p.X / Math.Max(fe.ActualWidth, 1);
+                    if (rel < 0.25)
+                        _controller.MoveRelative(dragHwnd, target.Hwnd, before: true);
+                    else if (rel > 0.75)
+                        _controller.MoveRelative(dragHwnd, target.Hwnd, before: false);
+                    else
+                        _controller.StackDrop(dragHwnd, target.Hwnd, before: false);
+                }
                 RebuildFromSlots(preserveScroll: true);
             }
             e.Handled = true;
@@ -844,15 +965,20 @@ public partial class SwitcherOverlay : Window
         }
     }
 
-    // ---------- Drag to reorder (slot model) ----------
+    // ---------- Drag: reorder / 集中 (stack) / 剥离 (peel) ----------
     // Draggable: every card except slot 0 (the special most-recent) and
-    // pinned ones. The drop renumbers unpinned slots, so a window dragged
-    // to the left of a pinned one claims the vacant number.
+    // pinned ones — inside a stack sub view everything is draggable.
+    // Drops: outer edge bands reorder, the center stacks onto the target,
+    // gaps reorder at the gap, and in the sub view (or from a fan edge)
+    // dropping outside the grid peels the member out of its stack.
     private OverlayWindow? _dragItem;
+    private IntPtr _dragHwnd;
     private Point _dragStart;
     private bool _dragActive;
+    private bool _dragFromFanStrip;
 
-    private bool CanDrag(OverlayWindow ow) => ow.SlotBadge != "0" && !ow.IsPinned;
+    private bool CanDrag(OverlayWindow ow) =>
+        _controller.IsInStackView || (ow.SlotBadge != "0" && !ow.IsPinned);
 
     /// <summary>Pin/close presses must not arm the card drag.</summary>
     private void OnToolDown(object sender, MouseButtonEventArgs e) => e.Handled = true;
@@ -868,17 +994,20 @@ public partial class SwitcherOverlay : Window
                 $"down '{ow0.Title}' at={e.GetPosition(fe0)} cardTL={scr} cursorPhys={cur}");
         }
         _dragItem = null;
+        _dragHwnd = IntPtr.Zero;
         _dragActive = false;
+        _dragFromFanStrip = false;
         if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow && CanDrag(ow))
         {
             _dragItem = ow;
+            _dragHwnd = ow.Hwnd;
             _dragStart = e.GetPosition(this);
         }
     }
 
     private void OnCardMouseMove(object sender, MouseEventArgs e)
     {
-        if (_dragItem is null || e.LeftButton != MouseButtonState.Pressed) return;
+        if (_dragHwnd == IntPtr.Zero || e.LeftButton != MouseButtonState.Pressed) return;
         var p = e.GetPosition(this);
         if (!_dragActive &&
             Math.Abs(p.X - _dragStart.X) + Math.Abs(p.Y - _dragStart.Y) > 8)
@@ -888,15 +1017,96 @@ public partial class SwitcherOverlay : Window
         }
     }
 
-    /// <summary>Cleanup when the release lands on padding instead of a card
-    /// (card handlers only fire over card content).</summary>
-    private void OnOverlayMouseUp(object sender, MouseButtonEventArgs e) => EndDrag();
+    /// <summary>Release over padding/gaps — the card handlers only cover
+    /// card content. Sub view outside-grid drops peel (剥离); fan-edge
+    /// drags peel anywhere off the cards; gaps otherwise insert at the
+    /// nearest card boundary.</summary>
+    private void OnOverlayMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_dragActive) { EndDrag(); return; }
+        var dragHwnd = _dragHwnd;
+        var fromStrip = _dragFromFanStrip;
+        EndDrag();
+        if (dragHwnd == IntPtr.Zero) return;
+        var p = e.GetPosition(WindowsList);
+        var inGrid = p.X >= 0 && p.Y >= 0
+            && p.X <= WindowsList.ActualWidth && p.Y <= WindowsList.ActualHeight;
+        var peel = fromStrip || (_controller.IsInStackView && !inGrid);
+        if (peel)
+        {
+            if (_controller.PeelFromStack(dragHwnd))
+                RebuildFromSlots(preserveScroll: true);
+            return;
+        }
+        var drop = FindGapInsert(p);
+        if (drop is not { } d) return;
+        if (_controller.IsInStackView)
+            _controller.StackDrop(dragHwnd, d.target, d.before); // member reorder
+        else
+            _controller.MoveRelative(dragHwnd, d.target, d.before);
+        RebuildFromSlots(preserveScroll: true);
+    }
+
+    /// <summary>Nearest card on the cursor's row: dropping left of its
+    /// center inserts before it, right inserts after — the 间隙 drop.</summary>
+    private (IntPtr target, bool before)? FindGapInsert(Point p)
+    {
+        FrameworkElement? best = null;
+        double bestD = double.MaxValue;
+        var before = false;
+        for (var i = 0; i < _windows.Count; i++)
+        {
+            if (WindowsList.ItemContainerGenerator.ContainerFromIndex(i) is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not FrameworkElement card) continue;
+            var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            var cy = pos.Y + card.ActualHeight / 2;
+            if (Math.Abs(p.Y - cy) > card.ActualHeight) continue; // different row
+            var d = Math.Abs(p.X - (pos.X + card.ActualWidth / 2));
+            if (d >= bestD) continue;
+            bestD = d;
+            best = card;
+            before = p.X < pos.X + card.ActualWidth / 2;
+        }
+        return best?.DataContext is OverlayWindow ow ? (ow.Hwnd, before) : null;
+    }
 
     private void EndDrag()
     {
         if (_dragItem is not null && DragCard(_dragItem) is { } b) b.Opacity = 1;
         _dragItem = null;
+        _dragHwnd = IntPtr.Zero;
         _dragActive = false;
+        _dragFromFanStrip = false;
+    }
+
+    // ---------- Fan strip drag (主页面堆叠的侧边条 = 非首位成员) ----------
+
+    private void OnStripMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true; // must not arm the whole-card drag
+        _dragItem = null;
+        _dragHwnd = IntPtr.Zero;
+        _dragActive = false;
+        _dragFromFanStrip = false;
+        if (sender is FrameworkElement fe && fe.DataContext is FanStrip strip)
+        {
+            _dragHwnd = strip.MemberHwnd;
+            _dragFromFanStrip = true;
+            _dragStart = e.GetPosition(this);
+            WindowSwitcherWpf.Services.Log.Info("CardEvent",
+                $"strip down member=0x{strip.MemberHwnd.ToInt64():X}");
+        }
+    }
+
+    private void OnStripMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true; // a strip click must not fall through to card click
+        if (_dragActive) return; // real drop handled by card/gap handlers
+        if (sender is FrameworkElement fe && fe.DataContext is FanStrip strip)
+        {
+            // Plain click on a fan edge activates that member directly.
+            if (_controller.SelectByHwnd(strip.MemberHwnd)) Commit();
+        }
     }
 
     private Border? DragCard(OverlayWindow w) =>
@@ -1039,6 +1249,53 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new(nameof(GroupStripBrush)));
         PropertyChanged?.Invoke(this, new(nameof(GroupBadgeBrush)));
     }
+
+    // ---- Stack card (堆叠) ----
+    // A stack head renders one card for the WHOLE stack: an ×N badge in
+    // the title row plus up to three layered fan strips on the left (从左
+    // 往右叠一半) — each strip is a live drop target for that member
+    // (click = activate it, drag out = 剥离).
+    private int _stackCount;
+    public int StackCount
+    {
+        get => _stackCount;
+        set
+        {
+            if (_stackCount == value) return;
+            _stackCount = value;
+            PropertyChanged?.Invoke(this, new(nameof(StackCount)));
+            PropertyChanged?.Invoke(this, new(nameof(StackBadge)));
+            PropertyChanged?.Invoke(this, new(nameof(StackBadgeVisibility)));
+            PropertyChanged?.Invoke(this, new(nameof(StackEdgeWidth)));
+        }
+    }
+
+    public string StackBadge => StackCount >= 2 ? "×" + StackCount : "";
+
+    public System.Windows.Visibility StackBadgeVisibility =>
+        StackCount >= 2 ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+
+    /// <summary>Width of the fan-strip column: zero for lone cards.</summary>
+    public System.Windows.GridLength StackEdgeWidth => new(
+        StackCount >= 2 ? Math.Min(StackCount - 1, 3) * 12 : 0);
+
+    private System.Collections.Generic.IReadOnlyList<FanStrip> _fanStrips =
+        Array.Empty<FanStrip>();
+    public System.Collections.Generic.IReadOnlyList<FanStrip> FanStrips => _fanStrips;
+
+    public void BuildFanStrips(System.Collections.Generic.IEnumerable<IntPtr> memberHwnds,
+        System.Windows.Media.Color accent)
+    {
+        // members[1] sits right behind the face (most opaque); deeper
+        // layers fade out. Leftmost strip = deepest member.
+        var layers = memberHwnds.Take(3)
+            .Select((h, i) => new FanStrip(h, new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromArgb((byte)(0xC0 - i * 0x26), accent.R, accent.G, accent.B))))
+            .Reverse()
+            .ToList();
+        _fanStrips = layers;
+        PropertyChanged?.Invoke(this, new(nameof(FanStrips)));
+    }
     private BitmapSource? _thumbnail;
     public BitmapSource? Thumbnail
     {
@@ -1112,3 +1369,8 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
         ThumbWidth = Math.Round(150 * Math.Clamp(aspect, 0.6, 2.6));
     }
 }
+
+/// <summary>One fan-strip layer of a stack card: a colored sliver standing
+/// for the member behind the face card (click activates it, dragging it
+/// away peels it out of the stack).</summary>
+public sealed record FanStrip(IntPtr MemberHwnd, System.Windows.Media.Brush Tint);

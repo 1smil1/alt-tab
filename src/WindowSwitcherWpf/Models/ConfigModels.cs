@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace WindowSwitcherWpf.Models;
@@ -14,6 +15,8 @@ public sealed class ConfigFile
     public List<TemplateDefinition> Templates { get; set; } = new();
 
     public List<SortMethodDefinition> SortMethods { get; set; } = new();
+
+    public List<StackDefinition> Stacks { get; set; } = new();
 }
 
 /// <summary>A named slot layout. Applying a template matches live windows
@@ -54,4 +57,26 @@ public sealed class SortRule
     public string Type { get; set; } = "process";
 
     public string Value { get; set; } = string.Empty;
+}
+
+/// <summary>手动堆叠 (自定义集中): an ordered set of windows collapsed into
+/// ONE slot on the main page. Members[0] is the head — it lends the stack
+/// its slot number and its group color (以子标签的第一个标签属性为准).
+/// Identity is GroupKey+Title, the same stable identity pins use; a
+/// stack with fewer than 2 alive members just goes dormant (散开).</summary>
+public sealed class StackDefinition
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public List<StackMemberDef> Members { get; set; } = new();
+}
+
+/// <summary>One member of a stack, persisted by the same (GroupKey, Title)
+/// identity as pins/templates — generic structural matching, no app names
+/// hardcoded anywhere (通用过滤).</summary>
+public sealed class StackMemberDef
+{
+    public string GroupKey { get; set; } = string.Empty;
+
+    public string Title { get; set; } = string.Empty;
 }

@@ -33,7 +33,9 @@ public sealed class SwitcherController
     private List<WindowEntry> _flat = new();
 
     /// <summary>Windows with their computed slots — the authoritative card
-    /// list the overlay renders (slot order, then unmanaged leftovers).</summary>
+    /// list the overlay renders (slot order, then unmanaged leftovers).
+    /// Stack members (非首位) are NOT here: they are collapsed into their
+    /// head card, and only surface in the stack sub view.</summary>
     public IReadOnlyList<SlotWindow> Slotted { get; private set; } = new List<SlotWindow>();
     private IntPtr _lastForeground;
     public int ActiveFlatIndex { get; private set; }
@@ -41,6 +43,47 @@ public sealed class SwitcherController
     public int ActiveWindowIndex { get; private set; }
     public bool HasWindows => _flat.Count > 0;
     public event Action? StateChanged;
+
+    // ---------- 手动堆叠 (自定义集中/剥离) ----------
+    // A stack is an ordered set of windows collapsed into ONE slot on the
+    // main page: the head (Members[0]) carries the slot number and lends
+    // the group color; the rest hide behind it as fan layers. Alt+digit on
+    // a stack opens the 子标签页面 listing its members in relative order.
+
+    /// <summary>A live stack: members in relative order (head first),
+    /// resolved against alive windows during the last rebuild.</summary>
+    public sealed class WindowStackInfo
+    {
+        public required string Id { get; init; }
+        public required List<WindowEntry> Members { get; init; }
+        /// <summary>Slot digit the stack card shows (the head's slot).</summary>
+        public int Slot { get; set; } = -1;
+        public WindowEntry Head => Members[0];
+    }
+
+    private readonly Dictionary<IntPtr, WindowStackInfo> _stacksByHead = new();
+    private bool _inStackView;
+    private string? _activeStackId;
+
+    /// <summary>The active keyboard/click navigation list: the full flat
+    /// card list normally, or the current stack's members while in the
+    /// stack sub view (子标签页面里箭头/Alt+`只在堆叠成员间移动).</summary>
+    public IReadOnlyList<WindowEntry> Nav => _inStackView && ActiveStackInfo is { } s ? s.Members : _flat;
+
+    public bool IsInStackView => _inStackView;
+
+    public WindowStackInfo? ActiveStackInfo =>
+        _inStackView && _activeStackId is not null
+            ? _stacksByHead.Values.FirstOrDefault(s => s.Id == _activeStackId)
+            : null;
+
+    /// <summary>Stack behind a card (head hwnd → info), null for lone cards.</summary>
+    public WindowStackInfo? StackInfoFor(IntPtr hwnd) =>
+        _stacksByHead.TryGetValue(hwnd, out var s) ? s : null;
+
+    /// <summary>Heads of all currently-active stacks (self-test hook:
+    /// --show-overlay --enter-stack N uses it to jump into a sub view).</summary>
+    public List<IntPtr> StackHeads() => _stacksByHead.Keys.ToList();
 
     public SwitcherController(WindowEnumerator enumerator,
         WindowGroupingService grouping,
@@ -67,6 +110,10 @@ public sealed class SwitcherController
     {
         // Capture the window being left BEFORE the overlay takes focus —
         // it becomes the last card so card 0 is the most recent other one.
+        // A previous open's stack sub view never survives: every open
+        // starts on the main page.
+        _inStackView = false;
+        _activeStackId = null;
         var foreground = NativeMethods.GetForegroundWindow();
         _lastForeground = foreground;
         Refresh();
@@ -75,7 +122,7 @@ public sealed class SwitcherController
         ActiveGroupIndex = 0;
         ActiveWindowIndex = 0;
         WindowSwitcherWpf.Services.Log.Info("Controller",
-            $"OpenOverlay groups={Groups.Count} flat={_flat.Count}");
+            $"OpenOverlay groups={Groups.Count} flat={_flat.Count} stacks={_stacksByHead.Count}");
         StateChanged?.Invoke();
     }
 
@@ -89,8 +136,84 @@ public sealed class SwitcherController
             mru.RemoveAt(idx);
             mru.Add(entry);
         }
+
+        // Stack collapse (集中): resolve every configured stack against the
+        // alive windows; the head (first alive member) keeps its place in
+        // the MRU list — and therefore its slot — while the tail members
+        // are pulled OUT of the list so their numbers free up for others.
+        // Fewer than 2 alive members = the stack is dormant (散开).
+        _stacksByHead.Clear();
+        var consumed = new HashSet<WindowEntry>();
+        foreach (var def in _config.Stacks)
+        {
+            var alive = new List<WindowEntry>();
+            foreach (var m in def.Members)
+            {
+                var hit = mru.FirstOrDefault(w =>
+                    !consumed.Contains(w)
+                    && w.GroupKey == m.GroupKey && w.Title == m.Title);
+                if (hit is null) continue;
+                consumed.Add(hit);
+                alive.Add(hit);
+            }
+            if (alive.Count < 2) continue;
+            foreach (var t in alive.Skip(1)) mru.Remove(t);
+            _stacksByHead[alive[0].Hwnd] = new WindowStackInfo
+            {
+                Id = def.Id,
+                Members = alive,
+            };
+        }
+
         Slotted = AssignSlots(mru, _order.Pins, _activeSortRules);
         _flat = Slotted.Select(s => s.Entry).ToList();
+        foreach (var sw in Slotted)
+        {
+            if (_stacksByHead.TryGetValue(sw.Entry.Hwnd, out var info))
+                info.Slot = sw.Slot;
+        }
+    }
+
+    // ---------- Stack sub view (子标签页面) ----------
+
+    /// <summary>Alt+数字 on a stack card: switch the nav list to the stack's
+    /// members; arrows / Alt+` / digits now move within the stack, and Alt
+    /// release commits the selected member. Selection starts on the head.</summary>
+    public bool EnterStackView(IntPtr headHwnd)
+    {
+        if (!_stacksByHead.TryGetValue(headHwnd, out var info)) return false;
+        _inStackView = true;
+        _activeStackId = info.Id;
+        ActiveFlatIndex = 0; // head = first member
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"stack view enter '{info.Head.Title}' members={info.Members.Count}");
+        StateChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>Esc from the sub view (or peel leaving one member): back to
+    /// the main page, selection re-pointed at the stack head.</summary>
+    public void ExitStackView()
+    {
+        if (!_inStackView) return;
+        var head = ActiveStackInfo?.Head.Hwnd;
+        _inStackView = false;
+        _activeStackId = null;
+        if (head is IntPtr h)
+        {
+            var i = _flat.FindIndex(w => w.Hwnd == h);
+            ActiveFlatIndex = i >= 0 ? i : 0;
+        }
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>Drop the sub view when its stack dissolved (e.g. the peel
+    /// left one member): the caller rebuilds whatever view it needs.</summary>
+    private void StackViewReset()
+    {
+        if (!_inStackView) return;
+        _inStackView = false;
+        _activeStackId = null;
     }
 
     /// <summary>Apply a template: match live windows to the template's slot
@@ -310,11 +433,13 @@ public sealed class SwitcherController
     }
 
     /// <summary>Flat card selection with wrap-around; used by Tab advance
-    /// and by the arrow-key grid navigation in the overlay.</summary>
+    /// and by the arrow-key grid navigation in the overlay. Wraps within
+    /// the ACTIVE nav list (full cards, or stack members in the sub view).</summary>
     public void SelectFlat(int index)
     {
-        if (_flat.Count == 0) return;
-        ActiveFlatIndex = ((index % _flat.Count) + _flat.Count) % _flat.Count;
+        var n = Nav.Count;
+        if (n == 0) return;
+        ActiveFlatIndex = ((index % n) + n) % n;
         StateChanged?.Invoke();
     }
 
@@ -336,19 +461,32 @@ public sealed class SwitcherController
         return slots.Count;
     }
 
-    public void SelectByDigit(int digit)
+    public bool SelectByDigit(int digit)
     {
         // Digits address SLOT numbers (Alt+3 → the card badged 3), not flat
-        // positions — a vacant pin slot shifts the display order.
+        // positions — a vacant pin slot shifts the display order. Inside the
+        // stack sub view they switch to RELATIVE member index instead
+        // (相对标签数字不需要显示 但有 — hidden but functional).
+        if (_inStackView)
+        {
+            var members = ActiveStackInfo?.Members;
+            if (members is null) return false;
+            var i = digit == 0 ? 9 : digit - 1;
+            if (i >= members.Count) return false;
+            ActiveFlatIndex = i;
+            StateChanged?.Invoke();
+            return true;
+        }
         for (var i = 0; i < Slotted.Count; i++)
         {
             if (Slotted[i].Slot == digit)
             {
                 ActiveFlatIndex = i;
                 StateChanged?.Invoke();
-                return;
+                return true;
             }
         }
+        return false;
     }
 
     /// <summary>Makes <paramref name="hwnd"/> the committed-on-Enter target
@@ -368,12 +506,159 @@ public sealed class SwitcherController
     public void Commit()
     {
         if (!HasWindows) return;
-        var entry = _flat[Math.Min(ActiveFlatIndex, _flat.Count - 1)];
+        var entry = Nav[Math.Min(ActiveFlatIndex, Nav.Count - 1)];
+        // The sub view never survives the commit — the next open starts
+        // on the main page.
+        StackViewReset();
         WindowSwitcherWpf.Services.Log.Info("Controller", $"commit 0x{entry.Hwnd.ToInt64():X} '{entry.Title}'");
         _activate(entry.Hwnd);
     }
 
-    public void Cancel() { WindowSwitcherWpf.Services.Log.Info("Controller", "cancel"); }
+    public void Cancel()
+    {
+        StackViewReset();
+        WindowSwitcherWpf.Services.Log.Info("Controller", "cancel");
+    }
+
+    // ---------- 堆叠编辑 (拖拽集中 / 剥离 / 换序) ----------
+
+    /// <summary>Unified drop onto a card (拖到卡上): same stack → reorder
+    /// members; lone card → joins/creates a stack; a dropped stack head
+    /// carries its whole stack. <paramref name="before"/> from the drop
+    /// position. Persists and reflots the view.</summary>
+    public bool StackDrop(IntPtr dragHwnd, IntPtr targetHwnd, bool before)
+    {
+        var drag = EntryByHwnd(dragHwnd);
+        var target = EntryByHwnd(targetHwnd);
+        if (drag is null || target is null) return false;
+        if (!StackDropCore(_config.Stacks, drag, target, before)) return false;
+        SaveStacksAndReflow();
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"stack drop '{drag.Title}' → '{target.Title}' before={before}");
+        return true;
+    }
+
+    /// <summary>剥离: pull one member out of its stack. The last two
+    /// members dissolving leaves the survivor as a normal lone card.</summary>
+    public bool PeelFromStack(IntPtr memberHwnd)
+    {
+        var entry = EntryByHwnd(memberHwnd);
+        if (entry is null) return false;
+        if (!PeelCore(_config.Stacks, entry)) return false;
+        SaveStacksAndReflow();
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"peel '{entry.Title}' from stack");
+        return true;
+    }
+
+    /// <summary>Persist stack defs, rebuild the card/stack map, and keep
+    /// the sub view pointed at the same stack id when it still exists
+    /// (its member list may have changed under it).</summary>
+    private void SaveStacksAndReflow()
+    {
+        var wasId = _inStackView ? _activeStackId : null;
+        StackViewReset(); // KeepSelection works on the flat list
+        _configStore?.Save(_config);
+        RebuildFlat(_lastForeground);
+        KeepSelection();
+        if (wasId is not null && _stacksByHead.Values.Any(s => s.Id == wasId))
+        {
+            _inStackView = true;
+            _activeStackId = wasId;
+            ActiveFlatIndex = 0; // selection = head inside the member list
+        }
+        StateChanged?.Invoke();
+    }
+
+    private WindowEntry? EntryByHwnd(IntPtr hwnd) =>
+        Groups.SelectMany(g => g.Windows).FirstOrDefault(w => w.Hwnd == hwnd);
+
+    private static bool SameId(StackMemberDef m, WindowEntry w) =>
+        m.GroupKey == w.GroupKey && m.Title == w.Title;
+
+    private static StackMemberDef MemberOf(WindowEntry w) =>
+        new() { GroupKey = w.GroupKey, Title = w.Title };
+
+    private static StackDefinition? FindDef(List<StackDefinition> defs, WindowEntry w) =>
+        defs.FirstOrDefault(d => d.Members.Any(m => SameId(m, w)));
+
+    /// <summary>Pure drop core (unit-tested via --test-slots style CLI).
+        /// Drop rules: same stack → member reorder; lone+lone → new stack
+        /// (head = the TARGET — it was there first, the dragged card lands
+        /// on it); lone → target's stack at the target member's position;
+        /// dropped stack head → the whole stack splices in. Returns false
+        /// on no-op drops.</summary>
+    public static bool StackDropCore(List<StackDefinition> defs, WindowEntry drag, WindowEntry target, bool before)
+    {
+        if (SameId(MemberOf(drag), target) || drag.Hwnd == target.Hwnd) return false;
+        var dragDef = FindDef(defs, drag);
+        var targetDef = FindDef(defs, target);
+        var sameStack = dragDef is not null && ReferenceEquals(dragDef, targetDef);
+        var dragIsHead = dragDef is not null && SameId(dragDef.Members[0], drag);
+
+        if (sameStack)
+        {
+            // Reorder inside one stack. The head already sits first; only
+            // non-head members actually move.
+            if (dragIsHead) return false;
+            var def = dragDef!;
+            var di = def.Members.FindIndex(m => SameId(m, drag));
+            var ti = def.Members.FindIndex(m => SameId(m, target));
+            var at = ti + (before ? 0 : 1);
+            if (at == di || at == di + 1) return false;
+            var m = def.Members[di];
+            def.Members.RemoveAt(di);
+            def.Members.Insert(at > di ? at - 1 : at, m);
+            return true;
+        }
+
+        // Carry the payload: a dropped head carries its WHOLE stack; a
+        // non-head member detaches alone (and may dissolve its origin).
+        List<StackMemberDef> payload;
+        string movingId;
+        if (dragDef is not null && dragIsHead)
+        {
+            payload = dragDef.Members.ToList();
+            movingId = dragDef.Id;
+            defs.Remove(dragDef);
+        }
+        else
+        {
+            payload = new List<StackMemberDef> { MemberOf(drag) };
+            movingId = Guid.NewGuid().ToString("N");
+            if (dragDef is not null)
+            {
+                dragDef.Members.RemoveAll(m => SameId(m, drag));
+                if (dragDef.Members.Count <= 1) defs.Remove(dragDef); // 散开
+            }
+        }
+
+        if (targetDef is null)
+        {
+            // Lone target: target joins the payload — head = target when
+            // dropped after (中心/右半: 叠在上面), head = dragged when before.
+            var merged = before
+                ? new List<StackMemberDef>(payload) { MemberOf(target) }
+                : new List<StackMemberDef> { MemberOf(target) }.Concat(payload).ToList();
+            defs.Add(new StackDefinition { Id = movingId, Members = merged });
+            return true;
+        }
+
+        var targetIdx = targetDef.Members.FindIndex(m => SameId(m, target));
+        targetDef.Members.InsertRange(targetIdx + (before ? 0 : 1), payload);
+        return true;
+    }
+
+    /// <summary>Pure peel core: remove one member; a def left with fewer
+    /// than 2 members dissolves (剩下的那个回到普通卡).</summary>
+    public static bool PeelCore(List<StackDefinition> defs, WindowEntry w)
+    {
+        var def = FindDef(defs, w);
+        if (def is null) return false;
+        def.Members.RemoveAll(m => SameId(m, w));
+        if (def.Members.Count <= 1) defs.Remove(def);
+        return true;
+    }
 
     public void ReloadOrder()
     {
