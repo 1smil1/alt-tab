@@ -122,6 +122,12 @@ public partial class SwitcherOverlay : Window
             _isOpen = true;
             _thumbTimer.Start();
             CenterOnCursorMonitor();
+            // The Rebuild() above ran while _isOpen was still false, so its
+            // thumbnail/cascade chain was skipped — schedule it now that the
+            // window is shown and open (Loaded < ApplicationIdle, so these
+            // run before PrepareMinimizedThenRegister registers).
+            Dispatcher.BeginInvoke(new Action(BuildCascades), DispatcherPriority.Loaded);
+            Dispatcher.BeginInvoke(new Action(UpdateLiveRects), DispatcherPriority.Loaded);
             // DWM thumbnails are registered after the window is shown and
             // fully laid out (destination rects are client coordinates).
             // Minimized windows render their tiny minimized frame into DWM
@@ -295,13 +301,15 @@ public partial class SwitcherOverlay : Window
         if (_controller.IsInStackView)
         {
             var info = _controller.ActiveStackInfo!;
-            foreach (var m in info.Members)
+            for (var idx = 0; idx < info.Members.Count; idx++)
             {
+                var m = info.Members[idx];
                 var ow = new OverlayWindow(m, m.GroupKey, 0)
                 {
-                    // Shared slot digit (共用一个标签数字); relative member
-                    // numbers exist but are deliberately not displayed.
-                    SlotBadge = info.Slot >= 0 ? info.Slot.ToString() : "",
+                    // Sub view digits are RELATIVE member numbers (1,2,…) —
+                    // not the shared slot digit; Alt+digit maps 1..9→0..8,
+                    // 0→9th, matching SelectByDigit.
+                    SlotBadge = RelativeMemberDigit(idx),
                 };
                 var cached = LookupCache(ow.Hwnd);
                 if (cached is not null)
@@ -335,20 +343,6 @@ public partial class SwitcherOverlay : Window
         WindowSwitcherWpf.Services.Log.Info("Overlay",
             $"rebuild windows={_windows.Count} stackView={_controller.IsInStackView}");
         AssignGroupAccents();
-        // Fan strips borrow the head's group accent, so they are built
-        // after AssignGroupAccents filled the map.
-        if (!_controller.IsInStackView)
-        {
-            foreach (var ow in _windows)
-            {
-                var st = _controller.StackInfoFor(ow.Hwnd);
-                if (st is null || ow.StackCount < 2) continue;
-                var accent = _accentMap.TryGetValue(ow.GroupKey, out var c)
-                    ? c
-                    : System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A);
-                ow.BuildFanStrips(st.Members.Skip(1).Select(x => x.Hwnd), accent);
-            }
-        }
         // Thumbnail capture happens via _thumbTimer, NEVER in Rebuild,
         // otherwise 113 PrintWindow calls block the dispatcher for ~2s
         // and the user releases Alt before the window is shown.
@@ -356,10 +350,17 @@ public partial class SwitcherOverlay : Window
         RefreshThumbnails();
         // The visible card set changes when a stack sub view opens/closes,
         // so the DWM registrations follow it; same-set rebuilds (pin drag)
-        // skip the churn to avoid flicker.
+        // skip the churn to avoid flicker. Cascade sub-cards must be built
+        // before the rects are measured (FIFO at the same priority).
         if (_isOpen)
         {
-            var desired = _windows.Select(w => w.Hwnd).ToHashSet();
+            var desired = new HashSet<IntPtr>(_windows.Select(w => w.Hwnd));
+            if (!_controller.IsInStackView)
+                foreach (var w in _windows)
+                    if (_controller.StackInfoFor(w.Hwnd) is { } st2)
+                        foreach (var m in st2.Members)
+                            desired.Add(m.Hwnd);
+            Dispatcher.BeginInvoke(new Action(BuildCascades), DispatcherPriority.Loaded);
             if (!_liveThumbs.Keys.ToHashSet().SetEquals(desired))
                 Dispatcher.BeginInvoke(new Action(RegisterLiveThumbnails), DispatcherPriority.Loaded);
             Dispatcher.BeginInvoke(new Action(UpdateLiveRects), DispatcherPriority.Loaded);
@@ -830,32 +831,47 @@ public partial class SwitcherOverlay : Window
         UnregisterLiveThumbnails();
         if (PresentationSource.FromVisual(this) is not HwndSource src) return;
 
-        foreach (var w in _windows)
+        void Register(IntPtr hwnd, OverlayWindow? vm)
         {
-            if (_liveThumbs.ContainsKey(w.Hwnd)) continue;
+            if (_liveThumbs.ContainsKey(hwnd)) return;
             try
             {
-                var hr = NativeMethods.DwmRegisterThumbnail(src.Handle, w.Hwnd, out var id);
+                var hr = NativeMethods.DwmRegisterThumbnail(src.Handle, hwnd, out var id);
                 if (hr != 0)
                 {
                     WindowSwitcherWpf.Services.Log.Info("Overlay",
-                        $"dwm register failed hr=0x{hr:X} hwnd=0x{w.Hwnd.ToInt64():X}");
-                    continue;
+                        $"dwm register failed hr=0x{hr:X} hwnd=0x{hwnd.ToInt64():X}");
+                    return;
                 }
-                _liveThumbs[w.Hwnd] = id;
+                _liveThumbs[hwnd] = id;
                 // Never-danced minimized windows would show their tiny
                 // minimized frame; keep the static/placeholder card up
                 // until the dance upgrades the surface (~1s).
-                w.HasLivePreview = !NativeMethods.IsIconic(w.Hwnd)
-                    || s_dancedHwnds.Contains(w.Hwnd.ToInt64());
+                if (vm is not null)
+                    vm.HasLivePreview = !NativeMethods.IsIconic(hwnd)
+                        || s_dancedHwnds.Contains(hwnd.ToInt64());
             }
             catch (Exception ex)
             {
                 WindowSwitcherWpf.Services.Log.Exception("Overlay.Register", ex);
             }
         }
+
+        foreach (var w in _windows)
+            Register(w.Hwnd, w);
+        // Cascade members show half-previews on the head card in the main
+        // view — they need registrations even without a card of their own.
+        if (!_controller.IsInStackView)
+        {
+            foreach (var w in _windows)
+            {
+                if (_controller.StackInfoFor(w.Hwnd) is not { } st) continue;
+                foreach (var m in st.Members)
+                    if (m.Hwnd != w.Hwnd) Register(m.Hwnd, null);
+            }
+        }
         WindowSwitcherWpf.Services.Log.Info("Overlay",
-            $"live thumbnails registered={_liveThumbs.Count}/{_windows.Count}");
+            $"live thumbnails registered={_liveThumbs.Count}");
         UpdateLiveRects();
     }
 
@@ -875,8 +891,17 @@ public partial class SwitcherOverlay : Window
         try
         {
             var origin = RootBorder.PointToScreen(new Point(0, 0));
+            var cascadeDone = new HashSet<IntPtr>();
             foreach (var w in _windows)
             {
+                // Stack heads render their members as a left→right cascade
+                // (从左往右叠一半); every member gets a clipped rect there.
+                if (!_controller.IsInStackView
+                    && _controller.StackInfoFor(w.Hwnd) is { } st && st.Members.Count >= 2)
+                {
+                    UpdateCascadeRects(w, st, origin, cascadeDone);
+                    continue;
+                }
                 if (!_liveThumbs.TryGetValue(w.Hwnd, out var id)) continue;
                 var el = FindThumbBorder(w);
                 if (el is null || !el.IsLoaded) continue;
@@ -918,6 +943,285 @@ public partial class SwitcherOverlay : Window
             return null;
         return WindowsList.ItemTemplate?.FindName("ThumbBorder", cp) as FrameworkElement;
     }
+
+    /// <summary>Clip rects for a stack cascade (从左往右叠一半): members
+    /// 0..n-2 show the LEFT HALF of their client area in the left half of
+    /// their sub-card (the rest is covered by the next card), the last
+    /// member is fully visible with the full client area.</summary>
+    private void UpdateCascadeRects(OverlayWindow head, SwitcherController.WindowStackInfo st,
+        Point origin, HashSet<IntPtr> done)
+    {
+        var headEl = FindThumbBorder(head);
+        if (headEl is null || !headEl.IsLoaded) return;
+        var n = st.Members.Count;
+        for (var i = 0; i < n; i++)
+        {
+            var m = st.Members[i];
+            done.Add(m.Hwnd);
+            if (!_liveThumbs.TryGetValue(m.Hwnd, out var id)) continue;
+            var el = i == 0 ? headEl
+                : _cascadeThumbs.TryGetValue(m.Hwnd, out var t) ? t : null;
+            if (el is null || !el.IsLoaded) continue;
+            var tl = el.PointToScreen(new Point(0, 0));
+            var br = el.PointToScreen(new Point(el.ActualWidth, el.ActualHeight));
+            var width = br.X - tl.X;
+            var height = br.Y - tl.Y;
+            var last = i == n - 1;
+            // Visible width: full for the last card, half otherwise.
+            var visW = last ? width : width / 2;
+            var flags = NativeMethods.DWM_TNP_RECTDESTINATION
+                        | NativeMethods.DWM_TNP_VISIBLE;
+            var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
+            {
+                rcDestination = new NativeMethods.RECT
+                {
+                    Left = (int)(tl.X - origin.X),
+                    Top = (int)(tl.Y - origin.Y),
+                    Right = (int)(tl.X - origin.X + visW),
+                    Bottom = (int)(tl.Y - origin.Y + height),
+                },
+                fVisible = true,
+                opacity = 255,
+            };
+            if (last)
+            {
+                flags |= NativeMethods.DWM_TNP_SOURCECLIENTAREA;
+                props.fSourceClientAreaOnly = true;
+            }
+            else
+            {
+                // Source = left half of the client area, same aspect as the
+                // visible half — a true "half window" preview.
+                flags |= NativeMethods.DWM_TNP_RECTSOURCE;
+                NativeMethods.GetClientRect(m.Hwnd, out var crc);
+                props.rcSource = new NativeMethods.RECT
+                {
+                    Left = 0,
+                    Top = 0,
+                    Right = (int)((crc.Right - crc.Left) / 2),
+                    Bottom = crc.Bottom - crc.Top,
+                };
+            }
+            props.dwFlags = flags;
+            NativeMethods.DwmUpdateThumbnailProperties(id, ref props);
+        }
+    }
+
+    // ---------- Cascade sub-cards (堆叠级联: 从左往右叠一半) ----------
+    // The declarative template renders the HEAD card; members 1..n-1 are
+    // injected as overlapping sub-cards offset by half a card each (later
+    // children draw on top, so the last member is the fully visible face).
+    private readonly Dictionary<IntPtr, Border> _cascadeThumbs = new();
+
+    private void BuildCascades()
+    {
+        _cascadeThumbs.Clear();
+        WindowSwitcherWpf.Services.Log.Info("Cascade",
+            $"build open={_isOpen} stackView={_controller.IsInStackView} windows={_windows.Count}");
+        if (!_isOpen || _controller.IsInStackView) return;
+        foreach (var ow in _windows)
+        {
+            if (_controller.StackInfoFor(ow.Hwnd) is not { } st
+                || st.Members.Count < 2) continue;
+            if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
+                is not ContentPresenter cp)
+            {
+                WindowSwitcherWpf.Services.Log.Info("Cascade", "no container");
+                continue;
+            }
+            if (WindowsList.ItemTemplate?.FindName("CardRoot", cp) is not Grid root)
+            {
+                WindowSwitcherWpf.Services.Log.Info("Cascade", "no CardRoot");
+                continue;
+            }
+            for (var i = root.Children.Count - 1; i >= 0; i--)
+                if (root.Children[i] is Border b && Equals(b.Tag, "cascade"))
+                    root.Children.RemoveAt(i);
+            var cardW = ow.ThumbWidth + 16;
+            var peek = cardW / 2;
+            var accent = _accentMap.TryGetValue(ow.GroupKey, out var c)
+                ? c : System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A);
+            var added = 0;
+            for (var i = 1; i < st.Members.Count; i++)
+            {
+                var m = st.Members[i];
+                var sub = BuildCascadeCard(m, ow.ThumbWidth, cardW,
+                    i * peek, accent, i == st.Members.Count - 1);
+                root.Children.Add(sub);
+                added++;
+            }
+            WindowSwitcherWpf.Services.Log.Info("Cascade",
+                $"head='{ow.DisplayTitle}' cardW={cardW:F0} added={added}");
+        }
+        // Freshly added sub-cards have no layout yet at Loaded priority —
+        // re-measure the rects once the pass at Render priority has run.
+        Dispatcher.BeginInvoke(new Action(UpdateLiveRects), DispatcherPriority.Render);
+    }
+
+    /// <summary>One overlapped member card: title strip + half-visible
+    /// live preview. Plain click = 直达, drag = that member (peel/re-stack).
+    /// The last member also carries the pin/close tools.</summary>
+    private Border BuildCascadeCard(WindowEntry m, double thumbW, double cardW,
+        double offsetX, System.Windows.Media.Color accent, bool last)
+    {
+        var strip = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(8, 7, 8, 7) };
+        var icon = new Image
+        {
+            Width = 20, Height = 20, VerticalAlignment = VerticalAlignment.Center,
+            Source = LookupCache(m.Hwnd)?.Icon,
+        };
+        System.Windows.Media.RenderOptions.SetBitmapScalingMode(icon,
+            System.Windows.Media.BitmapScalingMode.HighQuality);
+        strip.Children.Add(icon);
+        strip.Children.Add(new TextBlock
+        {
+            Text = m.Title, FontSize = 12, FontWeight = FontWeights.SemiBold,
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x20, 0x20, 0x20)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(7, 0, 0, 0),
+            MaxWidth = Math.Max(cardW - (last ? 130 : 60), 30),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+        });
+        if (last)
+        {
+            // Tools live on the fully visible card (the head's own tools
+            // are covered by the cascade). Pin acts on the stack identity.
+            strip.Children.Add(MakeCascadeTool(m.Hwnd, "📌", "固定此堆叠", OnCascadePinClick));
+            strip.Children.Add(MakeCascadeTool(m.Hwnd, "✕", "关闭此窗口", OnCascadeCloseClick));
+        }
+        var thumb = new Border
+        {
+            Height = 150,
+            Width = thumbW,
+            Margin = new Thickness(7, 0, 7, 7),
+            CornerRadius = new CornerRadius(6),
+            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xEF, 0xEF, 0xEF)),
+            BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0x22, 0, 0, 0)),
+            BorderThickness = new Thickness(1),
+            ClipToBounds = true,
+        };
+        var ph = new Image
+        {
+            Width = 44, Height = 44,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Source = LookupCache(m.Hwnd)?.Icon,
+        };
+        thumb.Child = new Grid { Children = { ph } };
+        _cascadeThumbs[m.Hwnd] = thumb;
+
+        var panel = new StackPanel();
+        panel.Children.Add(strip);
+        panel.Children.Add(thumb);
+        var sub = new Border
+        {
+            Width = cardW,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(offsetX, 0, 0, 0),
+            CornerRadius = new CornerRadius(8),
+            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF)),
+            BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0x1A, 0, 0, 0)),
+            BorderThickness = new Thickness(1),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Tag = "cascade",
+            Child = panel,
+        };
+        sub.MouseLeftButtonDown += OnCascadeDown;
+        sub.MouseMove += OnCardMouseMove;
+        sub.MouseLeftButtonUp += OnCascadeUp;
+        return sub;
+    }
+
+    private static Border MakeCascadeTool(IntPtr hwnd, string glyph, string tip,
+        MouseButtonEventHandler up)
+    {
+        var b = new Border
+        {
+            Width = 20, Height = 20, Margin = new Thickness(2, 0, 0, 0),
+            CornerRadius = new CornerRadius(4),
+            Background = System.Windows.Media.Brushes.Transparent,
+            ToolTip = tip,
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Tag = hwnd,
+        };
+        b.MouseLeftButtonDown += (_, e) => e.Handled = true;
+        b.MouseLeftButtonUp += up;
+        b.Child = new TextBlock
+        {
+            Text = glyph, FontSize = 10,
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x61, 0x61, 0x61)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        return b;
+    }
+
+    /// <summary>Digit shown for a relative member index: 1..9, 0 = 10th
+    /// (same mapping SelectByDigit uses for Alt+digit).</summary>
+    internal static string RelativeMemberDigit(int index) =>
+        index >= 9 ? "0" : (index + 1).ToString();
+
+    private void OnCascadeDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true; // must not arm the whole-card (head) drag
+        _dragItem = null;
+        _dragHwnd = IntPtr.Zero;
+        _dragActive = false;
+        _dragFromFanStrip = false;
+        if (sender is FrameworkElement fe && fe.Tag is IntPtr h && h != IntPtr.Zero)
+        {
+            // Cascade sub-cards only exist for members 1..n-1: a drag
+            // carries that member alone (same drop semantics as the old
+            // fan-edge drags), the head region drags the whole stack.
+            _dragHwnd = h;
+            _dragFromFanStrip = true;
+            _dragStart = e.GetPosition(this);
+        }
+    }
+
+    private void OnCascadeUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_dragActive)
+            return; // let it bubble to OnCardClick → drop onto this stack
+        if (sender is FrameworkElement fe && fe.Tag is IntPtr h
+            && _controller.SelectByHwnd(h))
+            Commit();
+        e.Handled = true;
+    }
+
+    private void OnCascadePinClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
+        {
+            _controller.TogglePin(ow.Hwnd); // head identity = the stack card
+            RebuildFromSlots(preserveScroll: true);
+            e.Handled = true;
+        }
+    }
+
+    private void OnCascadeCloseClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: IntPtr h } && h != IntPtr.Zero)
+            CloseWindowGracefully(h);
+        e.Handled = true;
+    }
+
+    private void CloseWindowGracefully(IntPtr hwnd)
+    {
+        NativeMethods.PostMessage(hwnd, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        WindowSwitcherWpf.Services.Log.Info("Overlay", $"close posted hwnd=0x{hwnd:X}");
+        // Apps tear down asynchronously; refresh the grid once they do.
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        t.Tick += (_, _) =>
+        {
+            t.Stop();
+            if (!_isOpen) return;
+            _controller.OpenOverlay();
+            Rebuild();
+        };
+        t.Start();
+    }
+
 
     private void OnCardClick(object sender, MouseButtonEventArgs e)
     {
@@ -1080,34 +1384,7 @@ public partial class SwitcherOverlay : Window
     }
 
     // ---------- Fan strip drag (主页面堆叠的侧边条 = 非首位成员) ----------
-
-    private void OnStripMouseDown(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true; // must not arm the whole-card drag
-        _dragItem = null;
-        _dragHwnd = IntPtr.Zero;
-        _dragActive = false;
-        _dragFromFanStrip = false;
-        if (sender is FrameworkElement fe && fe.DataContext is FanStrip strip)
-        {
-            _dragHwnd = strip.MemberHwnd;
-            _dragFromFanStrip = true;
-            _dragStart = e.GetPosition(this);
-            WindowSwitcherWpf.Services.Log.Info("CardEvent",
-                $"strip down member=0x{strip.MemberHwnd.ToInt64():X}");
-        }
-    }
-
-    private void OnStripMouseUp(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true; // a strip click must not fall through to card click
-        if (_dragActive) return; // real drop handled by card/gap handlers
-        if (sender is FrameworkElement fe && fe.DataContext is FanStrip strip)
-        {
-            // Plain click on a fan edge activates that member directly.
-            if (_controller.SelectByHwnd(strip.MemberHwnd)) Commit();
-        }
-    }
+    // (Replaced by the cascade sub-cards — OnCascadeDown/OnCascadeUp.)
 
     private Border? DragCard(OverlayWindow w) =>
         WindowsList.ItemContainerGenerator.ContainerFromItem(w) is ContentPresenter cp
@@ -1132,19 +1409,8 @@ public partial class SwitcherOverlay : Window
         if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
         {
             // Graceful close (same as the window's own ✕), not a kill.
-            NativeMethods.PostMessage(ow.Hwnd, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-            WindowSwitcherWpf.Services.Log.Info("Overlay", $"close posted hwnd=0x{ow.Hwnd:X}");
+            CloseWindowGracefully(ow.Hwnd);
             e.Handled = true;
-            // Apps tear down asynchronously; refresh the grid once they do.
-            var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-            t.Tick += (_, _) =>
-            {
-                t.Stop();
-                if (!_isOpen) return;
-                _controller.OpenOverlay();
-                Rebuild();
-            };
-            t.Start();
         }
     }
 }
@@ -1251,10 +1517,10 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     }
 
     // ---- Stack card (堆叠) ----
-    // A stack head renders one card for the WHOLE stack: an ×N badge in
-    // the title row plus up to three layered fan strips on the left (从左
-    // 往右叠一半) — each strip is a live drop target for that member
-    // (click = activate it, drag out = 剥离).
+    // A stack head renders one card for the WHOLE stack: an ×N badge next
+    // to the slot digit. The members themselves render as a left→right
+    // cascade of half-overlapped live previews (从左往右叠一半) — built
+    // imperatively in BuildCascades, NOT here (the VM stays fan-free).
     private int _stackCount;
     public int StackCount
     {
@@ -1266,7 +1532,6 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new(nameof(StackCount)));
             PropertyChanged?.Invoke(this, new(nameof(StackBadge)));
             PropertyChanged?.Invoke(this, new(nameof(StackBadgeVisibility)));
-            PropertyChanged?.Invoke(this, new(nameof(StackEdgeWidth)));
         }
     }
 
@@ -1274,28 +1539,6 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
 
     public System.Windows.Visibility StackBadgeVisibility =>
         StackCount >= 2 ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
-
-    /// <summary>Width of the fan-strip column: zero for lone cards.</summary>
-    public System.Windows.GridLength StackEdgeWidth => new(
-        StackCount >= 2 ? Math.Min(StackCount - 1, 3) * 12 : 0);
-
-    private System.Collections.Generic.IReadOnlyList<FanStrip> _fanStrips =
-        Array.Empty<FanStrip>();
-    public System.Collections.Generic.IReadOnlyList<FanStrip> FanStrips => _fanStrips;
-
-    public void BuildFanStrips(System.Collections.Generic.IEnumerable<IntPtr> memberHwnds,
-        System.Windows.Media.Color accent)
-    {
-        // members[1] sits right behind the face (most opaque); deeper
-        // layers fade out. Leftmost strip = deepest member.
-        var layers = memberHwnds.Take(3)
-            .Select((h, i) => new FanStrip(h, new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromArgb((byte)(0xC0 - i * 0x26), accent.R, accent.G, accent.B))))
-            .Reverse()
-            .ToList();
-        _fanStrips = layers;
-        PropertyChanged?.Invoke(this, new(nameof(FanStrips)));
-    }
     private BitmapSource? _thumbnail;
     public BitmapSource? Thumbnail
     {
@@ -1373,4 +1616,3 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
 /// <summary>One fan-strip layer of a stack card: a colored sliver standing
 /// for the member behind the face card (click activates it, dragging it
 /// away peels it out of the stack).</summary>
-public sealed record FanStrip(IntPtr MemberHwnd, System.Windows.Media.Brush Tint);

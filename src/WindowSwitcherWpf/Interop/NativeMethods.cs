@@ -171,6 +171,11 @@ public static class NativeMethods
     [DllImport("dwmapi.dll")]
     public static extern int DwmUpdateThumbnailProperties(IntPtr hThumbnailId, ref DWM_THUMBNAIL_PROPERTIES ptnProperties);
 
+    // Cascade half-previews (叠一半): the visible left half of a stacked
+    // member needs the source client rect to cut the source in two.
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hwnd, out RECT lpRect);
+
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 

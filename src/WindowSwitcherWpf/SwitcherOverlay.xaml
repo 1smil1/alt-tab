@@ -142,49 +142,16 @@
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <!-- Fan-strip column (堆叠侧边条): the
-                                         layered members behind the face
-                                         card; zero width for lone cards. -->
-                                    <ColumnDefinition Width="{Binding StackEdgeWidth}"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
+                            <Grid x:Name="CardRoot">
                                 <!-- Group accent strip: 3px hue line at the
                                      card top; brightens when any card of
                                      the same app group is hovered. -->
                                 <Rectangle Height="3"
-                                           Grid.Column="1"
                                            VerticalAlignment="Top"
                                            Margin="14,3,14,0"
                                            RadiusX="1.5" RadiusY="1.5"
                                            Fill="{Binding GroupStripBrush}"/>
-                                <!-- Fan strips: each stands for one member
-                                     behind the face (click = 直达, drag out
-                                     = 剥离). -->
-                                <ItemsControl Grid.Column="0"
-                                              ItemsSource="{Binding FanStrips}"
-                                              VerticalAlignment="Stretch"
-                                              Focusable="False">
-                                    <ItemsControl.ItemsPanel>
-                                        <ItemsPanelTemplate>
-                                            <StackPanel Orientation="Horizontal"/>
-                                        </ItemsPanelTemplate>
-                                    </ItemsControl.ItemsPanel>
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Border Background="{Binding Tint}"
-                                                    Width="11"
-                                                    Margin="0,6,1,6"
-                                                    CornerRadius="4,0,0,4"
-                                                    Cursor="Hand"
-                                                    MouseLeftButtonDown="OnStripMouseDown"
-                                                    MouseLeftButtonUp="OnStripMouseUp"
-                                                    ToolTip="点击直达此窗口 · 拖出=剥离"/>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                            <StackPanel Grid.Column="1">
+                            <StackPanel>
                                 <Grid Margin="8,7,8,7">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
                                         <!-- Slot number badge sits top-left, in
