@@ -24,10 +24,24 @@ public sealed class KeyboardHook : IDisposable
     public event Action? OverlayCommit;
     public event Action? OverlayCancel;
     /// <summary>Esc while the overlay is open. The subscriber decides what
-    /// it means: leaving a stack sub view (子标签页面 → 主页面) or closing
-    /// the overlay — the hook itself has no view state.</summary>
+    /// it means: leaving a stack view (子标签页面 → 主页面) or closing
+    /// the overlay — the hook swallows it either way.</summary>
     public event Action? OverlayEscape;
     public event Action? EscapePressed;
+    /// <summary>一次直达 (overlay closed): quick-modifier + digit pressed.
+    /// The app decides tap (=jump) vs hold (≥300ms on a堆叠 = 子标签页面)
+    /// — the hook only reports press/release.</summary>
+    public event Action<int>? QuickJumpDown;
+    /// <summary>The quick-jump digit released (快速松开 = 跳转).</summary>
+    public event Action<int>? QuickJumpUp;
+
+    /// <summary>Alt+Tab 拦截开关 (config SuppressAltTab 解析后的最终值):
+    /// 开 = Alt+Tab 永远到不了系统 (被我们的 overlay 取代).</summary>
+    public bool SuppressAltTabActive { get; set; }
+
+    /// <summary>一次直达修饰键的 virtual keys (默认 Alt 三键). Set from
+    /// config QuickJumpModifier via HotkeyParser.ModifierKeys.</summary>
+    public uint[] QuickModifierVirtualKeys { get; set; } = { 0x12, 0xA4, 0xA5 };
 
     public uint TriggerVirtualKey { get; set; } = 0xC0; // VK_OEM_3 = backtick
     public uint TriggerScanCode { get; set; } = 0x29;
@@ -37,6 +51,9 @@ public sealed class KeyboardHook : IDisposable
     private IntPtr _hook = IntPtr.Zero;
     private bool _altDown;
     private bool _overlayOpen;
+    // 一次直达状态: quick 修饰键是否按住 + 当前按住的数字 vk (0=无)
+    private bool _quickModDown;
+    private uint _quickDigitVk;
 
     public KeyboardHook()
     {
@@ -85,16 +102,42 @@ public sealed class KeyboardHook : IDisposable
         var sc = data.scanCode;
         var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
 
-        if (vk == 0x12 || vk == 0xA4 || vk == 0xA5)
+        // 修饰键跟踪: Alt (overlay 触发/提交) + quick 修饰键 (一次直达).
+        // Alt 三键同时属于两个角色 — 都要更新, 缺一不可.
+        if (vk == 0x12 || vk == 0xA4 || vk == 0xA5
+            || Array.IndexOf(QuickModifierVirtualKeys, vk) >= 0)
         {
-            var wasDown = _altDown;
-            _altDown = !isUp;
-            if (isUp && _overlayOpen)
+            if (vk == 0x12 || vk == 0xA4 || vk == 0xA5)
             {
-                Log.Info("KeyboardHook", "alt-up commit");
-                Fire(OverlayCommit);
+                _altDown = !isUp;
+                if (isUp && _overlayOpen)
+                {
+                    Log.Info("KeyboardHook", "alt-up commit");
+                    Fire(OverlayCommit);
+                }
             }
+            if (Array.IndexOf(QuickModifierVirtualKeys, vk) >= 0)
+                _quickModDown = !isUp;
             return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+        }
+
+        // quick 数字键松开 → 跳转 (仅当 down 是被我们吞掉的那次).
+        if (isUp && _quickDigitVk != 0 && vk == _quickDigitVk)
+        {
+            var digit = DigitFromVk(vk);
+            _quickDigitVk = 0;
+            Log.Info("KeyboardHook", $"quick jump up {digit}");
+            Fire(() => QuickJumpUp?.Invoke(digit));
+            return new IntPtr(1);
+        }
+
+        // Alt+Tab 拦截 (SuppressAltTab): 热键本身是 Tab 时触发分支已经
+        // 吞掉了; 这里补拦截的是 "热键≠Tab 但配置了拦截" 的组合.
+        if (SuppressAltTabActive && _altDown && !isUp && vk == 0x09
+            && TriggerVirtualKey != 0x09)
+        {
+            Log.Info("KeyboardHook", "suppressed system alt+tab");
+            return new IntPtr(1);
         }
 
         if (_altDown && !isUp)
@@ -131,18 +174,34 @@ public sealed class KeyboardHook : IDisposable
                     Fire(() => OverlayArrow?.Invoke(vkArrow));
                     return new IntPtr(1);
                 }
-                // Alt+数字: main row 0-9 and numpad 0-9 address slot badges.
+                // Alt+数字 (overlay open): main row 0-9 + numpad 0-9.
                 if (vk is >= 0x30 and <= 0x39 or >= 0x60 and <= 0x69)
                 {
-                    var digit = (int)(vk >= 0x60 ? vk - 0x60 : vk - 0x30);
+                    var digit = DigitFromVk(vk);
                     Log.Info("KeyboardHook", $"alt+digit {digit}");
                     Fire(() => OverlayDigit?.Invoke(digit));
                     return new IntPtr(1);
                 }
             }
         }
+
+        // 一次直达 (overlay closed): quick+数字. 整个组合被吞掉 — 不让
+        // 焦点应用收到 Alt+1 (浏览器切 tab 之类). 按住等 QuickJumpUp,
+        // App 层区分 快速松开=跳转 / 按住堆叠≥300ms=子标签页面.
+        if (!_overlayOpen && _quickModDown && !isUp && _quickDigitVk == 0
+            && vk is >= 0x30 and <= 0x39 or >= 0x60 and <= 0x69)
+        {
+            var digit = DigitFromVk(vk);
+            _quickDigitVk = vk;
+            Log.Info("KeyboardHook", $"quick jump down {digit}");
+            Fire(() => QuickJumpDown?.Invoke(digit));
+            return new IntPtr(1);
+        }
         return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
     }
+
+    private static int DigitFromVk(uint vk) =>
+        vk >= 0x60 ? (int)(vk - 0x60) : (int)(vk - 0x30);
 
     private void Fire(Action? action)
     {

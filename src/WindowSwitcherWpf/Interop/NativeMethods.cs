@@ -334,6 +334,11 @@ public static class NativeMethods
 
     public const uint LLKHF_UP = 0x00000080;
 
+    [DllImport("user32.dll")]
+    public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    public const uint MAPVK_VK_TO_VSC = 0;
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr GetModuleHandleW(string lpModuleName);
 

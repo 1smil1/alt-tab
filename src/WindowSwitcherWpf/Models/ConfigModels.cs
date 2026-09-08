@@ -17,6 +17,20 @@ public sealed class ConfigFile
     public List<SortMethodDefinition> SortMethods { get; set; } = new();
 
     public List<StackDefinition> Stacks { get; set; } = new();
+
+    /// <summary>主快捷键 (唤出 overlay / 循环切换), 格式 "Alt+`" / "Alt+Tab" /
+    /// "Alt+OemMinus"。修饰键必须含 Alt (v1 钩子模型: 松开 Alt = 提交)。
+    /// null/空 = 默认 "Alt+`"。</summary>
+    public string? Hotkey { get; set; }
+
+    /// <summary>一次直达键的修饰键 (quick+N 直达第 N 个窗口), "Alt"/"Ctrl"/
+    /// "Shift"/"Win"。null/空 = 默认 "Alt"。注意与两段式区分: 两段式
+    /// (先唤 overlay 再按数字) 固定走 Alt+数字, 不可配置。</summary>
+    public string? QuickJumpModifier { get; set; }
+
+    /// <summary>是否拦截系统 Alt+Tab。null = 自动 (Hotkey 为 Alt+Tab 时
+    /// 拦截, 否则放行); false = 永不拦截; true = 永远拦截。</summary>
+    public bool? SuppressAltTab { get; set; }
 }
 
 /// <summary>A named slot layout. Applying a template matches live windows

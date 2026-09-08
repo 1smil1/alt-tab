@@ -89,6 +89,25 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Length > 0 && e.Args[0] == "--dump-slotted")
+        {
+            // 诊断: 重建 Slotted 并打印. 可传 0xHWND 当假想前台 —
+            // 复制卡只在 fg 在列表且不在首位时插入.
+            _orderStore = new OrderStore();
+            _grouping = new WindowGroupingService();
+            var configStore = new ConfigStore();
+            _controller = new SwitcherController(
+                new WindowEnumerator(), _grouping, _orderStore,
+                hwnd => ActivationService.Activate(hwnd), configStore);
+            var pretend = e.Args.Length > 1 && e.Args[1].StartsWith("0x")
+                ? new IntPtr(Convert.ToInt64(e.Args[1].Substring(2), 16))
+                : NativeMethods.GetForegroundWindow();
+            foreach (var line in _controller.DumpSlottedLines(pretend))
+                Console.WriteLine(line);
+            Shutdown();
+            return;
+        }
+
         if (e.Args.Length > 0 && e.Args[0] == "--show-overlay")
         {
             // Test mode: open the overlay immediately so a scripted screen
@@ -137,6 +156,7 @@ public partial class App : Application
         _overlay.Hide();
 
         _keyboard = new KeyboardHook();
+        ApplyHotkeyConfig(_keyboard);
         _keyboard.OverlayRequested += OnOverlayRequested;
         _keyboard.OverlayAdvance += OnOverlayAdvance;
         _keyboard.OverlayArrow += vk => _overlay?.NavigateArrow(vk);
@@ -145,6 +165,8 @@ public partial class App : Application
         _keyboard.OverlayCancel += OnOverlayCancel;
         _keyboard.OverlayEscape += OnOverlayEscape;
         _keyboard.EscapePressed += () => _overlay?.Cancel();
+        _keyboard.QuickJumpDown += OnQuickJumpDown;
+        _keyboard.QuickJumpUp += OnQuickJumpUp;
         _keyboard.Install();
 
         _foreground = new ForegroundWatcher();
@@ -159,6 +181,88 @@ public partial class App : Application
         Log.Info("App", "OnOverlayRequested");
         _overlay?.ShowAndFocus();
         _keyboard?.SetOverlayOpen(true);
+    }
+
+    // ---------- 可配置热键 + 一次直达 (config.json → hook) ----------
+
+    /// <summary>Apply config Hotkey / QuickJumpModifier / SuppressAltTab to
+    /// the hook. Defaults: "Alt+`" / Alt / null=自动 (Alt+Tab 热键 ⇒ 拦截).
+    /// 拦截 = 系统 Alt+Tab 永远收不到 Tab — 被我们的 overlay 取代.</summary>
+    private void ApplyHotkeyConfig(KeyboardHook hook)
+    {
+        if (_controller is null) return;
+        var hotkey = _controller.Config.Hotkey;
+        if (HotkeyParser.TryParseKey(hotkey, out var vk) && HotkeyParser.HasAlt(hotkey))
+        {
+            hook.TriggerVirtualKey = vk;
+            hook.TriggerScanCode = NativeMethods.MapVirtualKey(vk, NativeMethods.MAPVK_VK_TO_VSC);
+            Log.Info("App", $"hotkey '{hotkey}' → vk=0x{vk:X2} sc=0x{hook.TriggerScanCode:X2}");
+        }
+        else
+        {
+            Log.Info("App", $"hotkey '{hotkey}' invalid (v1 需含 Alt) — 默认 Alt+`");
+        }
+        hook.QuickModifierVirtualKeys = HotkeyParser.ModifierKeys(
+            _controller.Config.QuickJumpModifier);
+        hook.SuppressAltTabActive = _controller.Config.SuppressAltTab
+            ?? HotkeyParser.IsAltTab(hotkey);
+        Log.Info("App", $"suppressAltTab={hook.SuppressAltTabActive} " +
+            $"(config={_controller.Config.SuppressAltTab?.ToString() ?? "auto"})");
+    }
+
+    private System.Windows.Threading.DispatcherTimer? _quickHoldTimer;
+    private IntPtr _quickTargetHwnd;
+    private bool _quickOpenedStack;
+
+    /// <summary>一次直达按下: 记住目标; 若目标是堆叠头, 启动 300ms 按住
+    /// 计时 — 到点弹子标签页面 (像长按 Alt+数字进入堆叠内部).</summary>
+    private void OnQuickJumpDown(int digit)
+    {
+        if (_controller is null || _overlay is null) return;
+        _controller.PrepareQuickJump(); // 常驻态 Slotted 陈旧 — 先重建
+        _quickTargetHwnd = _controller.SlotCardHwnd(digit);
+        _quickOpenedStack = false;
+        if (_quickTargetHwnd == IntPtr.Zero) return;
+        if (_controller.StackInfoFor(_quickTargetHwnd) is not { } st || st.Members.Count < 2)
+            return; // 普通窗口: 松开即跳, 无需计时
+        _quickHoldTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(300),
+        };
+        _quickHoldTimer.Tick += (s, e) =>
+        {
+            StopQuickHoldTimer();
+            _quickOpenedStack = true;
+            Log.Info("App", $"quick hold {digit} → stack sub view '{st.Head.Title}'");
+            _overlay.ShowAndFocus();          // OpenOverlay resets to main page
+            _controller.EnterStackView(_quickTargetHwnd);
+            _overlay.TestRebuild();
+            _keyboard?.SetOverlayOpen(true);
+        };
+        _quickHoldTimer.Start();
+    }
+
+    /// <summary>一次直达松开: 按住已弹子页面 → 交给 Alt-up 提交; 否则
+    /// 立即跳转到目标窗口 (堆叠=跳 head).</summary>
+    private void OnQuickJumpUp(int digit)
+    {
+        StopQuickHoldTimer();
+        if (_quickOpenedStack)
+        {
+            _quickOpenedStack = false; // 子页面已开; Alt 松开提交所选成员
+            return;
+        }
+        if (_quickTargetHwnd != IntPtr.Zero)
+        {
+            _controller?.QuickActivate(_quickTargetHwnd);
+            _quickTargetHwnd = IntPtr.Zero;
+        }
+    }
+
+    private void StopQuickHoldTimer()
+    {
+        _quickHoldTimer?.Stop();
+        _quickHoldTimer = null;
     }
 
     private void OnOverlayAdvance(bool reverse) => _overlay?.Advance(reverse);
@@ -622,6 +726,26 @@ public partial class App : Application
         {
             Check("config-roundtrip", false, ex.Message);
         }
+
+        // 5. HotkeyParser: hotkey strings → VK + 自动拦截规则.
+        Check("hotkey-parse-backtick",
+            HotkeyParser.TryParseKey("Alt+`", out var hk1) && hk1 == 0xC0);
+        Check("hotkey-parse-tab",
+            HotkeyParser.TryParseKey("Alt+Tab", out var hk2) && hk2 == 0x09);
+        Check("hotkey-parse-minus",
+            HotkeyParser.TryParseKey("Alt+-", out var hk3) && hk3 == 0xBD);
+        Check("hotkey-parse-f5",
+            HotkeyParser.TryParseKey("Ctrl+Alt+F5", out var hk4) && hk4 == 0x74);
+        Check("hotkey-parse-invalid",
+            !HotkeyParser.TryParseKey("Alt+NoSuchKey", out _));
+        Check("hotkey-hasalt",
+            HotkeyParser.HasAlt("Alt+Tab") && !HotkeyParser.HasAlt("Ctrl+J"));
+        Check("hotkey-isalttab",
+            HotkeyParser.IsAltTab("Alt+Tab") && !HotkeyParser.IsAltTab("Alt+Tab+X")
+            && !HotkeyParser.IsAltTab("Alt+`"));
+        Check("hotkey-modifier-ctrl",
+            HotkeyParser.ModifierKeys("Ctrl")[0] == 0x11
+            && HotkeyParser.ModifierKeys(null)[0] == 0x12);
 
         WindowSwitcherWpf.Services.Log.Info("ConfigTests", "done");
         Environment.Exit(0);

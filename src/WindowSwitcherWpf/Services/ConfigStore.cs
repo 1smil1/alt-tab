@@ -46,6 +46,11 @@ public sealed class ConfigStore
             var json = File.ReadAllText(_path);
             var cfg = JsonSerializer.Deserialize<ConfigFile>(json, JsonOptions);
             cfg ??= DefaultConfig();
+            // 旧 config.json 缺新字段时反序列化得 null (不跑属性初始化器)
+            // → 补默认值, 与 "文件不存在" 路径行为一致.
+            var dft = DefaultConfig();
+            cfg.Hotkey ??= dft.Hotkey;
+            cfg.QuickJumpModifier ??= dft.QuickJumpModifier;
             Log.Info("Config", $"loaded config: templates={cfg.Templates.Count} sortMethods={cfg.SortMethods.Count}");
             return cfg;
         }
@@ -73,6 +78,9 @@ public sealed class ConfigStore
     /// names explain the semantics; user edits this file directly.</summary>
     public static ConfigFile DefaultConfig() => new()
     {
+        Hotkey = "Alt+`",
+        QuickJumpModifier = "Alt",
+        SuppressAltTab = null,
         Templates = new List<TemplateDefinition>
         {
             new()

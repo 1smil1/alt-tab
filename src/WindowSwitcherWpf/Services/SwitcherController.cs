@@ -124,7 +124,9 @@ public sealed class SwitcherController
         _lastForeground = foreground;
         Refresh();
         RebuildFlat(foreground);
-        ActiveFlatIndex = 0;
+        // 预选 0 号卡 (上个窗口) — Windows Alt+Tab 手感: 快速松开 = 切到
+        // 上个窗口. 复制卡占 index 0, 所以预选 index 1.
+        ActiveFlatIndex = _flat.Count > 1 ? 1 : 0;
         ActiveGroupIndex = 0;
         ActiveWindowIndex = 0;
         WindowSwitcherWpf.Services.Log.Info("Controller",
@@ -188,7 +190,23 @@ public sealed class SwitcherController
             };
         }
 
-        Slotted = AssignSlots(mru, _order.Pins, _activeSortRules);
+        var cards = AssignSlots(mru, _order.Pins, _activeSortRules);
+        // 当前窗口复制卡 (Windows Alt+Tab 左起第一张): badge = 真实编号,
+        // 真实卡留在原位. 0 号卡 (上个窗口) 紧随其后 — 预选/快速松开的
+        // 提交目标. 复制卡不参与数字寻址/导出/拖拽 (SelectByDigit /
+        // ExportCurrentAsTemplate / CanDrag 各自跳过).
+        if (foreground != IntPtr.Zero)
+        {
+            var fi = cards.FindIndex(s => s.Entry.Hwnd == foreground);
+            if (fi > 0) // 已在首位说明没有"上个窗口"可切 — 不插复制卡
+            {
+                var f = cards[fi];
+                cards = new List<SlotWindow> { f with { IsCurrentCopy = true } }
+                    .Concat(cards.Where((_, i) => i != fi))
+                    .ToList();
+            }
+        }
+        Slotted = cards;
         _flat = Slotted.Select(s => s.Entry).ToList();
         // Diagnostics: duplicate hwnds in the flat list break the cascade
         // build (two head cards share one stack → orphaned sub cards).
@@ -736,6 +754,7 @@ public sealed class SwitcherController
         var slots = new List<TemplateSlot>();
         foreach (var sw in Slotted)
         {
+            if (sw.IsCurrentCopy) continue; // 复制卡不进模板
             if (sw.Slot < 1 || sw.Slot > 10) continue;
             slots.Add(new TemplateSlot { Slot = sw.Slot, GroupKey = sw.Entry.GroupKey, Title = sw.Entry.Title });
         }
@@ -765,6 +784,7 @@ public sealed class SwitcherController
         }
         for (var i = 0; i < Slotted.Count; i++)
         {
+            if (Slotted[i].IsCurrentCopy) continue; // 复制卡不被数字寻址
             if (Slotted[i].Slot == digit)
             {
                 ActiveFlatIndex = i;
@@ -798,6 +818,55 @@ public sealed class SwitcherController
         StackViewReset();
         WindowSwitcherWpf.Services.Log.Info("Controller", $"commit 0x{entry.Hwnd.ToInt64():X} '{entry.Title}'");
         _activate(entry.Hwnd);
+    }
+
+    /// <summary>一次直达前调: Slotted 常驻态是陈旧的 (只在 overlay 打开时
+    /// 重建) — 先枚举一次活窗口, 编号→窗口映射才可信.</summary>
+    public void PrepareQuickJump()
+    {
+        var fg = NativeMethods.GetForegroundWindow();
+        _lastForeground = fg;
+        Refresh();
+        RebuildFlat(fg);
+    }
+
+    /// <summary>一次直达: quick+数字 的目标 hwnd — 该编号卡的窗口; 卡是
+    /// 堆叠头时返回 head hwnd (按住才进子页面, 快速松开=跳 head).
+    /// 复制卡不参与寻址. 0x0 = 无此编号.</summary>
+    public IntPtr SlotCardHwnd(int digit)
+    {
+        for (var i = 0; i < Slotted.Count; i++)
+        {
+            if (Slotted[i].IsCurrentCopy) continue;
+            if (Slotted[i].Slot == digit) return Slotted[i].Entry.Hwnd;
+        }
+        return IntPtr.Zero;
+    }
+
+    /// <summary>Activate a window directly (quick jump path — no overlay,
+    /// no selection bookkeeping).</summary>
+    public void QuickActivate(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        var entry = _flat.Find(w => w.Hwnd == hwnd);
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"quick jump 0x{hwnd.ToInt64():X} '{entry?.Title}'");
+        _activate(hwnd);
+    }
+
+    /// <summary>诊断: 按假想前台重建 Slotted 并逐卡打印 (复制卡插入 /
+    /// badge / 堆叠折叠) — 不动 UI. --dump-slotted [0xHWND].</summary>
+    public IEnumerable<string> DumpSlottedLines(IntPtr pretendForeground)
+    {
+        Refresh();
+        RebuildFlat(pretendForeground);
+        for (var i = 0; i < Slotted.Count; i++)
+        {
+            var sw = Slotted[i];
+            yield return $"i={i} copy={sw.IsCurrentCopy} slot={sw.Slot} " +
+                $"pin={sw.IsPinned} hwnd=0x{sw.Entry.Hwnd.ToInt64():X} " +
+                $"'{sw.Entry.Title}'";
+        }
     }
 
     public void Cancel()

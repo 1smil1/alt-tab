@@ -333,6 +333,7 @@ public partial class SwitcherOverlay : Window
                 {
                     SlotBadge = sw.Slot >= 0 ? sw.Slot.ToString() : "",
                     IsPinned = sw.IsPinned,
+                    IsCurrentCopy = sw.IsCurrentCopy,
                 };
                 var st = _controller.StackInfoFor(sw.Entry.Hwnd);
                 if (st is not null) ow.StackCount = st.Members.Count;
@@ -1083,6 +1084,7 @@ public partial class SwitcherOverlay : Window
             var seenHeads = new HashSet<IntPtr>();
             foreach (var ow in _windows)
             {
+                if (ow.IsCurrentCopy) continue; // 复制卡不承载 cascade
                 if (_controller.StackInfoFor(ow.Hwnd) is not { } st
                     || st.Members.Count < 2) continue;
                 if (!seenHeads.Add(ow.Hwnd))
@@ -1165,6 +1167,7 @@ public partial class SwitcherOverlay : Window
         var marginDirty = false;
         foreach (var ow in _windows)
         {
+            if (ow.IsCurrentCopy) continue; // 复制卡是纯展示卡 — 无overhang/工具/子卡
             if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
                 is not ContentPresenter cp) continue;
             var st = _controller.StackInfoFor(ow.Hwnd);
@@ -2000,7 +2003,8 @@ public partial class SwitcherOverlay : Window
     private FrameworkElement? _captureElt;
 
     private bool CanDrag(OverlayWindow ow) =>
-        !_controller.IsMemberPinned(ow.Hwnd)
+        !ow.IsCurrentCopy // 复制卡是纯展示卡 (真实卡留在原位)
+        && !_controller.IsMemberPinned(ow.Hwnd)
         && (_controller.IsInStackView || (ow.SlotBadge != "0" && !ow.IsPinned));
 
     /// <summary>Pin/close presses must not arm the card drag.</summary>
@@ -2379,6 +2383,9 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     public string GroupKey { get; }
     public int IndexInGroup { get; }
     public string ModulePath { get; }
+    /// <summary>当前窗口的复制卡 (Windows Alt+Tab 左起第一张): 纯展示 —
+    /// 不可拖/不承载 cascade/不被数字寻址; badge 显示真实编号.</summary>
+    public bool IsCurrentCopy { get; init; }
     private bool _isSelected;
     public bool IsSelected
     {
