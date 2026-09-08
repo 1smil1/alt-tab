@@ -65,6 +65,12 @@ public sealed class PinDefinition
     /// Null ⇒ a top-level card pin. Old order.json files lack the field and
     /// deserialize as null, which keeps them valid top-level pins.</summary>
     public string? MemberTitle { get; set; }
+
+    /// <summary>Non-null (member pins): the parent stack's stable config Id.
+    /// 成员重排会换 head (members[0]) — 锚定 head.Title 在 head 换人后失配,
+    /// 所以新 member pin 记 StackId; 旧文件无此字段, 匹配回退 GroupKey+Title.
+    /// Null on top-level pins and legacy member pins.</summary>
+    public string? StackId { get; set; }
 }
 
 /// <summary>One card in the overlay: the live window plus its computed

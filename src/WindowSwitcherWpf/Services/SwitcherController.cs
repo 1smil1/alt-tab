@@ -163,6 +163,23 @@ public sealed class SwitcherController
                 alive.Add(hit);
             }
             if (alive.Count < 2) continue;
+            // Heal pins orphaned by a pre-StackId head change (固定规则跟着
+            // 堆叠走): a pin anchored to a NON-first member is really the
+            // stack's old pin (that member WAS the head before a reorder)
+            // — retarget it to the alive head so it stops sitting dormant.
+            var headW = alive[0];
+            foreach (var p in _order.Pins)
+            {
+                var anchoredOld = alive.Skip(1).Any(m =>
+                    p.GroupKey == m.GroupKey && p.Title == m.Title);
+                if (!anchoredOld) continue;
+                if (p.MemberTitle is not null
+                    && alive.All(m => m.Title != p.MemberTitle)) continue;
+                WindowSwitcherWpf.Services.Log.Info("Controller",
+                    $"heal stale stack pin → head '{headW.Title}' (was '{p.Title}')");
+                p.GroupKey = headW.GroupKey;
+                p.Title = headW.Title;
+            }
             foreach (var t in alive.Skip(1)) mru.Remove(t);
             _stacksByHead[alive[0].Hwnd] = new WindowStackInfo
             {
@@ -367,8 +384,11 @@ public sealed class SwitcherController
         {
             // Unpinning a stack head also releases its member pins — the
             // members' guarantee (主标签固定) dies with the stack pin.
+            var headStackId = FindDef(_config.Stacks, sw.Entry)?.Id;
             _order.Pins.RemoveAll(p => p.MemberTitle is not null
-                && p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title);
+                && (headStackId is not null
+                    ? p.StackId == headStackId
+                    : p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title));
             _order.Pins.Remove(pin);
             WindowSwitcherWpf.Services.Log.Info("Controller",
                 $"unpin slot={pin.Slot} '{sw.Entry.Title}'");
@@ -410,6 +430,14 @@ public sealed class SwitcherController
     private WindowStackInfo? StackOfMember(IntPtr hwnd) =>
         _stacksByHead.Values.FirstOrDefault(s => s.Members.Any(m => m.Hwnd == hwnd));
 
+    /// <summary>Member-pin stack identity: StackId when present (新数据),
+    /// GroupKey + head-Title fallback (旧 order.json). 成员重排会换 head —
+    /// 旧锚定在 head 换人后失配, so new member pins record the stack Id.</summary>
+    private static bool MemberPinOnStack(PinDefinition p, string stackId,
+        string headGroupKey, string headTitle) =>
+        p.StackId is not null ? p.StackId == stackId
+            : p.GroupKey == headGroupKey && p.Title == headTitle;
+
     /// <summary>True when this window is a pinned member of a stack.</summary>
     public bool IsMemberPinned(IntPtr memberHwnd)
     {
@@ -418,7 +446,7 @@ public sealed class SwitcherController
         if (member is null) return false;
         var head = st.Head;
         return _order.Pins.Any(p => p.MemberTitle == member.Title
-            && p.GroupKey == head.GroupKey && p.Title == head.Title);
+            && MemberPinOnStack(p, st.Id, head.GroupKey, head.Title));
     }
 
     /// <summary>Pin/unpin a stack member (子标签固定). Pinning auto-pins the
@@ -426,13 +454,18 @@ public sealed class SwitcherController
     /// (解除子固定不动主固定). Frozen position = current member index.</summary>
     public bool ToggleMemberPin(IntPtr memberHwnd)
     {
-        if (StackOfMember(memberHwnd) is not { } st) return false;
+        if (StackOfMember(memberHwnd) is not { } st)
+        {
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"toggle member pin: no stack contains 0x{memberHwnd.ToInt64():X}");
+            return false;
+        }
         var head = st.Head;
         var member = st.Members.FirstOrDefault(m => m.Hwnd == memberHwnd);
         if (member is null) return false;
         var pin = _order.Pins.FirstOrDefault(p => p.MemberTitle is not null
             && p.MemberTitle == member.Title
-            && p.GroupKey == head.GroupKey && p.Title == head.Title);
+            && MemberPinOnStack(p, st.Id, head.GroupKey, head.Title));
         if (pin is not null)
         {
             _order.Pins.Remove(pin);
@@ -443,12 +476,24 @@ public sealed class SwitcherController
         {
             // 联动: a member pin requires the stack pin — create it first.
             var headSw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == head.Hwnd);
-            if (headSw is null) return false;
-            if (!headSw.IsPinned && !PinHeadCore(headSw)) return false;
+            if (headSw is null)
+            {
+                WindowSwitcherWpf.Services.Log.Info("Controller",
+                    $"toggle member pin: head 0x{head.Hwnd.ToInt64():X} '{head.Title}' not in Slotted");
+                return false;
+            }
+            if (!headSw.IsPinned && !PinHeadCore(headSw))
+            {
+                WindowSwitcherWpf.Services.Log.Info("Controller",
+                    $"toggle member pin: no free slot 1-10 to auto-pin the head " +
+                    $"(grid full, head slot={headSw.Slot})");
+                return false;
+            }
             var slot = st.Members.IndexOf(member) + 1; // 1-based frozen position
             _order.Pins.Add(new PinDefinition(head.GroupKey, head.Title, slot)
             {
                 MemberTitle = member.Title,
+                StackId = st.Id,
             });
             WindowSwitcherWpf.Services.Log.Info("Controller",
                 $"pin member '{member.Title}' pos={slot} of '{head.Title}'");
@@ -482,7 +527,7 @@ public sealed class SwitcherController
         }
         var head = def.Members[0];
         var pins = _order.Pins.Where(p => p.MemberTitle is not null
-            && p.GroupKey == head.GroupKey && p.Title == head.Title).ToList();
+            && MemberPinOnStack(p, def.Id, head.GroupKey, head.Title)).ToList();
         if (pins.Count == 0) return true;
         var numbers = MemberMonotonicNumbers(members, pins);
         for (var i = 0; i < members.Count; i++)
@@ -649,10 +694,11 @@ public sealed class SwitcherController
     /// targets a whole pinned stack), Zero if not currently alive.</summary>
     private IntPtr StackHeadHwnd(StackDefinition def)
     {
-        var head = def.Members.FirstOrDefault();
-        if (head is null) return IntPtr.Zero;
-        var e = _flat.Find(w => w.GroupKey == head.GroupKey && w.Title == head.Title);
-        return e?.Hwnd ?? IntPtr.Zero;
+        // def.Members 含已关闭的窗口 — def.Members[0] 不一定是活 head,
+        // 必须查 _stacksByHead (RebuildFlat 按活窗口解析出的 head)。
+        foreach (var kv in _stacksByHead)
+            if (kv.Value.Id == def.Id) return kv.Key;
+        return IntPtr.Zero;
     }
 
     /// <summary>Re-points ActiveFlatIndex at the previously selected hwnd
@@ -802,6 +848,8 @@ public sealed class SwitcherController
             }
         }
         if (!StackDropCore(_config.Stacks, drag, target, before)) return false;
+        // head 变化后的 pin 重锚由 RebuildFlat 的 heal 统一处理 (它基于
+        // 活窗口, 每次重建自动纠偏) — 这里不再单独迁移。
         SaveStacksAndReflow();
         WindowSwitcherWpf.Services.Log.Info("Controller",
             $"stack drop '{drag.Title}' → '{target.Title}' before={before}");
@@ -831,6 +879,9 @@ public sealed class SwitcherController
         _configStore?.Save(_config);
         RebuildFlat(_lastForeground);
         KeepSelection();
+        // heal (RebuildFlat 内) 可能改写了 pin 锚点 — 重新入队保存,
+        // 否则 heal 结果要到下一次变更才落盘 (期间崩溃则丢失).
+        _store.SaveDebounced(_order);
         if (wasId is not null && _stacksByHead.Values.Any(s => s.Id == wasId))
         {
             _inStackView = true;

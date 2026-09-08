@@ -1066,7 +1066,16 @@ public partial class SwitcherOverlay : Window
             _mainTools.Clear();
             foreach (var b in _pinOutlines.Values) DropLayer.Children.Remove(b);
             _pinOutlines.Clear();
-            if (!_isOpen || _controller.IsInStackView) return;
+            if (!_isOpen) return;
+            if (_controller.IsInStackView)
+            {
+                // 子页面 renders members as plain cards — no cascade builds
+                // here, but LayoutCascades must still run so containers
+                // carried over from the main page get their overhang margin
+                // and narrow head title restored (否则卡1后留白 + "Wo…" 截断).
+                LayoutCascades();
+                return;
+            }
             // Idempotence guard: the same head hwnd must yield exactly ONE
             // cascade. A duplicate flat entry would otherwise register the
             // second set of subs under the same dictionary keys, leaving
@@ -1167,12 +1176,16 @@ public partial class SwitcherOverlay : Window
                 _baseContainerMargins[cp] = baseMargin = cp.Margin;
             var cardW = ow.ThumbWidth + 16;
             var peek = cardW / 2;
+            // 子页面 (stack sub view) renders members as plain cards — the
+            // cascade overhang must NOT be reserved there, or a blank gap
+            // of (n-1)·peek follows the first card (用户实测 bug).
+            var reserveOverhang = stacked && !_controller.IsInStackView;
             // Head title trims with "…" inside the exposed head patch
             // ([0, peek)) instead of being hard-cut by the first sub card
             // (badge 23 + stack badge 29 + icon 20 + margins 15 ≈ 87 left).
             if (WindowsList.ItemTemplate?.FindName("TitleText", cp) is TextBlock tt)
-                tt.MaxWidth = stacked ? Math.Max(peek - 91, 30) : 230;
-            var extra = stacked ? (st.Members.Count - 1) * peek : 0;
+                tt.MaxWidth = reserveOverhang ? Math.Max(peek - 91, 30) : 230;
+            var extra = reserveOverhang ? (st.Members.Count - 1) * peek : 0;
             var target = new Thickness(baseMargin.Left, baseMargin.Top,
                 baseMargin.Right + extra, baseMargin.Bottom);
             if (cp.Margin.Right != target.Right)
@@ -1180,7 +1193,7 @@ public partial class SwitcherOverlay : Window
                 cp.Margin = target;
                 marginDirty = true;
             }
-            if (!stacked) continue;
+            if (!stacked || _controller.IsInStackView) continue;
             if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border headCard) continue;
             if (headCard.ActualWidth <= 0) { pending++; continue; }
             var headTl = headCard.TransformToVisual(DropLayer)
@@ -2326,7 +2339,8 @@ public partial class SwitcherOverlay : Window
     {
         if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
         {
-            WindowSwitcherWpf.Services.Log.Info("CardEvent", $"pinclick '{ow.Title}'");
+            WindowSwitcherWpf.Services.Log.Info("CardEvent", $"pinclick '{ow.Title}' " +
+                $"hwnd=0x{ow.Hwnd.ToInt64():X} stackView={_controller.IsInStackView}");
             // Sub view (alt+数字进入): the card IS a member — pin it as
             // such; main view pins the top-level slot. The controller
             // recomputes and persists; the overlay re-renders from it.
