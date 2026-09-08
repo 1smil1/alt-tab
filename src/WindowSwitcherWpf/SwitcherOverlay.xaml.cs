@@ -1035,7 +1035,7 @@ public partial class SwitcherOverlay : Window
                 continue;
             }
             for (var i = root.Children.Count - 1; i >= 0; i--)
-                if (root.Children[i] is Border b && Equals(b.Tag, "cascade"))
+                if (root.Children[i] is Border b && b.Tag is IntPtr)
                     root.Children.RemoveAt(i);
             var cardW = ow.ThumbWidth + 16;
             var peek = cardW / 2;
@@ -1123,12 +1123,15 @@ public partial class SwitcherOverlay : Window
             BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0x1A, 0, 0, 0)),
             BorderThickness = new Thickness(1),
             Cursor = System.Windows.Input.Cursors.Hand,
-            Tag = "cascade",
+            Tag = m.Hwnd, // member identity for drag/hover handlers
+            ToolTip = m.Title,
             Child = panel,
         };
         sub.MouseLeftButtonDown += OnCascadeDown;
         sub.MouseMove += OnCardMouseMove;
         sub.MouseLeftButtonUp += OnCascadeUp;
+        sub.MouseEnter += OnCascadeMouseEnter;
+        sub.MouseLeave += OnCascadeMouseLeave;
         return sub;
     }
 
@@ -1181,12 +1184,139 @@ public partial class SwitcherOverlay : Window
 
     private void OnCascadeUp(object sender, MouseButtonEventArgs e)
     {
-        if (_dragActive)
-            return; // let it bubble to OnCardClick → drop onto this stack
-        if (sender is FrameworkElement fe && fe.Tag is IntPtr h
-            && _controller.SelectByHwnd(h))
-            Commit();
+        var wasDrag = _dragActive;
+        var dragHwnd = _dragHwnd;
+        EndDrag(); // also hides drop indicators
+        if (!wasDrag)
+        {
+            if (sender is FrameworkElement fe && fe.Tag is IntPtr h
+                && _controller.SelectByHwnd(h)) Commit();
+            e.Handled = true;
+            return;
+        }
+        // Mouse capture routes the release here no matter where the cursor
+        // ended up, so sender no longer identifies the target — resolve it
+        // from the grid-space pointer position instead.
+        if (dragHwnd != IntPtr.Zero)
+            DropFanCardAt(e.GetPosition(WindowsList), dragHwnd);
         e.Handled = true;
+    }
+
+    /// <summary>Release resolver for fan-strip/cascade-member drags: over a
+    /// card, resolve member-precise (cascade) or join (lone); off the cards,
+    /// the release peels the member out (剥离). Shared by OnCascadeUp and
+    /// OnOverlayMouseUp so routing can never double-handle.</summary>
+    private void DropFanCardAt(Point p, IntPtr dragHwnd)
+    {
+        var card = CardAt(p);
+        if (card is not null && card.DataContext is OverlayWindow t
+            && t.Hwnd != dragHwnd)
+        {
+            var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            var relPt = new Point(p.X - pos.X, p.Y - pos.Y);
+            if (_controller.StackInfoFor(t.Hwnd) is { } st)
+                DropOnCascadeMember(t, st, relPt, card, dragHwnd);
+            else
+                _controller.StackDrop(dragHwnd, t.Hwnd, before: relPt.X < card.ActualWidth / 2);
+            RebuildFromSlots(preserveScroll: true);
+            return;
+        }
+        if (_controller.PeelFromStack(dragHwnd))
+            RebuildFromSlots(preserveScroll: true);
+    }
+
+    /// <summary>Which cascade member region the point sits in, and whether
+    /// it is that member's insert-before half. Shared by the drag preview
+    /// (the line indicator) and the drop so they can never disagree.</summary>
+    private static (int index, bool before)? CascadeRegion(
+        SwitcherController.WindowStackInfo st, double cardW, double x)
+    {
+        var n = st.Members.Count;
+        if (n == 0 || cardW <= 0) return null;
+        var peek = cardW / (n + 1); // visible step; each sub-card is 2·peek
+        var i = Math.Min((int)(x / peek), n - 1);
+        var visW = i == n - 1 ? cardW - i * peek : peek;
+        return (i, x - i * peek < visW / 2);
+    }
+
+    /// <summary>Member-precise cascade drop (成员精确排序): the member
+    /// region under the pointer is the target, its visible half decides
+    /// before/after; dropping on another cascade's member joins that stack
+    /// at that spot.</summary>
+    private void DropOnCascadeMember(OverlayWindow head, SwitcherController.WindowStackInfo st,
+        Point p, FrameworkElement fe, IntPtr dragHwnd)
+    {
+        if (CascadeRegion(st, fe.ActualWidth, p.X) is not { } r) return;
+        var target = st.Members[r.index].Hwnd;
+        if (target != dragHwnd)
+            _controller.StackDrop(dragHwnd, target, r.before);
+    }
+
+    // ---------- Cascade hover (悬停哪个成员 = 选中哪个) ----------
+    // The cascade shows only half of each covered member, so the pointer
+    // position decides the target: the hovered member's preview border
+    // turns blue, and a plain click activates exactly that member.
+    private static readonly System.Windows.Media.Brush CascadeHoverBrush =
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x00, 0x78, 0xD4));
+
+    private Border? _hoverThumb;
+
+    /// <summary>Highlight (or restore) the preview border of one member —
+    /// sub-card thumbs by hwnd, the head via its declarative ThumbBorder.
+    /// Returns the highlighted Border for state tracking.</summary>
+    private void SetCascadeHover(IntPtr hwnd, bool on)
+    {
+        Border? tb = null;
+        var src = "member";
+        if (_cascadeThumbs.TryGetValue(hwnd, out var t)) tb = t;
+        else
+        {
+            // The head has no sub-card: its ThumbBorder comes from the
+            // template (its exposed half is the head's clickable region).
+            src = "head";
+            var vm = _windows.FirstOrDefault(w => w.Hwnd == hwnd);
+            if (vm is not null) tb = FindThumbBorder(vm) as Border;
+        }
+        WindowSwitcherWpf.Services.Log.Info("CascadeHover",
+            $"{src} hwnd=0x{hwnd:X} on={on} found={tb is not null}");
+        if (tb is null) return;
+        if (on)
+        {
+            tb.BorderBrush = CascadeHoverBrush;
+            tb.BorderThickness = new Thickness(2);
+            _hoverThumb = tb;
+        }
+        else
+        {
+            tb.BorderBrush = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromArgb(0x22, 0, 0, 0));
+            tb.BorderThickness = new Thickness(1);
+            if (ReferenceEquals(_hoverThumb, tb)) _hoverThumb = null;
+        }
+    }
+
+    private void OnCascadeMouseEnter(object sender, MouseEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: IntPtr h }) SetCascadeHover(h, true);
+    }
+
+    private void OnCascadeMouseLeave(object sender, MouseEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: IntPtr h }) SetCascadeHover(h, false);
+    }
+
+    /// <summary>Hover on the head's exposed (left) half — the declarative
+    /// panel is hit only where no cascade sub-card covers it.</summary>
+    private void OnHeadHoverEnter(object sender, MouseEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: OverlayWindow ow })
+            SetCascadeHover(ow.Hwnd, true);
+    }
+
+    private void OnHeadHoverLeave(object sender, MouseEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: OverlayWindow ow })
+            SetCascadeHover(ow.Hwnd, false);
     }
 
     private void OnCascadePinClick(object sender, MouseButtonEventArgs e)
@@ -1225,43 +1355,11 @@ public partial class SwitcherOverlay : Window
 
     private void OnCardClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement fe0 && fe0.DataContext is OverlayWindow ow0)
-            WindowSwitcherWpf.Services.Log.Info("CardEvent",
-                $"cardclick '{ow0.Title}' dragActive={_dragActive}");
-        var wasDrag = _dragActive;
-        var dragHwnd = _dragHwnd;
-        var fromStrip = _dragFromFanStrip;
-        EndDrag();
-        if (wasDrag && dragHwnd != IntPtr.Zero
-            && sender is FrameworkElement fe && fe.DataContext is OverlayWindow target)
-        {
-            if (target.Hwnd != dragHwnd)
-            {
-                var p = e.GetPosition(fe);
-                if (fromStrip)
-                {
-                    // A fan edge carries just that member: dropping it on
-                    // any card joins that card's stack (集中/换组).
-                    _controller.StackDrop(dragHwnd, target.Hwnd, before: p.X < fe.ActualWidth / 2);
-                }
-                else
-                {
-                    // Zones: outer 25% bands = 排序 (before/after), middle
-                    // = 集中 (drop onto the card → stack).
-                    var rel = p.X / Math.Max(fe.ActualWidth, 1);
-                    if (rel < 0.25)
-                        _controller.MoveRelative(dragHwnd, target.Hwnd, before: true);
-                    else if (rel > 0.75)
-                        _controller.MoveRelative(dragHwnd, target.Hwnd, before: false);
-                    else
-                        _controller.StackDrop(dragHwnd, target.Hwnd, before: false);
-                }
-                RebuildFromSlots(preserveScroll: true);
-            }
-            e.Handled = true;
-            return;
-        }
-        if (sender is FrameworkElement fe2 && fe2.DataContext is OverlayWindow ow)
+        // During a drag the mouse capture routes every MouseUp to the drag
+        // card itself, so sender can no longer identify the drop target —
+        // release handling lives in OnOverlayMouseUp (geometry-based).
+        if (_dragActive) return;
+        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
         {
             // The controller's selection must follow the mouse, otherwise
             // Commit() would activate the keyboard-selected window instead.
@@ -1280,6 +1378,7 @@ public partial class SwitcherOverlay : Window
     private Point _dragStart;
     private bool _dragActive;
     private bool _dragFromFanStrip;
+    private FrameworkElement? _captureElt;
 
     private bool CanDrag(OverlayWindow ow) =>
         _controller.IsInStackView || (ow.SlotBadge != "0" && !ow.IsPinned);
@@ -1289,14 +1388,6 @@ public partial class SwitcherOverlay : Window
 
     private void OnCardMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement fe0 && fe0.DataContext is OverlayWindow ow0)
-        {
-            var scr = fe0.PointToScreen(new Point(0, 0));
-            Interop.NativeMethods.GetCursorPos(out var cpt);
-            var cur = new Point(cpt.x, cpt.y);
-            WindowSwitcherWpf.Services.Log.Info("CardEvent",
-                $"down '{ow0.Title}' at={e.GetPosition(fe0)} cardTL={scr} cursorPhys={cur}");
-        }
         _dragItem = null;
         _dragHwnd = IntPtr.Zero;
         _dragActive = false;
@@ -1318,13 +1409,22 @@ public partial class SwitcherOverlay : Window
         {
             _dragActive = true;
             if (DragCard(_dragItem) is { } b) b.Opacity = 0.55;
+            // Capture on the element that raised the move (template Card or
+            // cascade sub-card): events keep routing here — and bubbling to
+            // the overlay release handlers — even when the cursor leaves the
+            // card or the window, so an outside release still drops / peels
+            // instead of leaving the drag armed forever.
+            _captureElt = sender as FrameworkElement;
+            _captureElt?.CaptureMouse();
         }
     }
 
-    /// <summary>Release over padding/gaps — the card handlers only cover
-    /// card content. Sub view outside-grid drops peel (剥离); fan-edge
-    /// drags peel anywhere off the cards; gaps otherwise insert at the
-    /// nearest card boundary.</summary>
+    /// <summary>Single drop resolver for every drag release. Geometry-based
+    /// (CardAt / grid bounds) so it stays correct while the mouse capture
+    /// routes the events to the drag card — including releases outside the
+    /// window. Zones on a card: 排序 bands / 集中 center (main), all-reorder
+    /// (sub view); off-card: peel (剥离) for fan-strip and sub-view-outside,
+    /// gap insert otherwise.</summary>
     private void OnOverlayMouseUp(object sender, MouseButtonEventArgs e)
     {
         if (!_dragActive) { EndDrag(); return; }
@@ -1333,11 +1433,47 @@ public partial class SwitcherOverlay : Window
         EndDrag();
         if (dragHwnd == IntPtr.Zero) return;
         var p = e.GetPosition(WindowsList);
-        var inGrid = p.X >= 0 && p.Y >= 0
-            && p.X <= WindowsList.ActualWidth && p.Y <= WindowsList.ActualHeight;
-        var peel = fromStrip || (_controller.IsInStackView && !inGrid);
-        if (peel)
+        var inGrid = InCardGrid(p);
+        var card = CardAt(p);
+        if (card is not null && card.DataContext is OverlayWindow target)
         {
+            if (target.Hwnd == dragHwnd) return; // released on itself: no-op
+            var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            var rel = (p.X - pos.X) / Math.Max(card.ActualWidth, 1);
+            if (fromStrip)
+            {
+                // A cascade member carries just itself: dropping it on a
+                // cascade resolves the exact member under the pointer; on a
+                // lone card it joins that card's stack (集中). Shared with
+                // OnCascadeUp so both routings behave identically.
+                DropFanCardAt(p, dragHwnd);
+                return;
+            }
+            else if (_controller.IsInStackView)
+            {
+                // Sub view: every card is a member of the same stack, so any
+                // card drop reorders members (StackDropCore's same-stack
+                // branch) — left half lands before, right half after.
+                _controller.StackDrop(dragHwnd, target.Hwnd, before: rel < 0.5);
+            }
+            else
+            {
+                // Zones: outer 25% bands = 排序 (before/after), middle
+                // = 集中 (drop onto the card → stack).
+                if (rel < 0.25)
+                    _controller.MoveRelative(dragHwnd, target.Hwnd, before: true);
+                else if (rel > 0.75)
+                    _controller.MoveRelative(dragHwnd, target.Hwnd, before: false);
+                else
+                    _controller.StackDrop(dragHwnd, target.Hwnd, before: false);
+            }
+            RebuildFromSlots(preserveScroll: true);
+            return;
+        }
+        if (fromStrip || (_controller.IsInStackView && !inGrid))
+        {
+            // Off the cards in peel mode (cascade member dragged out, or
+            // sub view outside the grid): the release detaches it.
             if (_controller.PeelFromStack(dragHwnd))
                 RebuildFromSlots(preserveScroll: true);
             return;
@@ -1353,7 +1489,7 @@ public partial class SwitcherOverlay : Window
 
     /// <summary>Nearest card on the cursor's row: dropping left of its
     /// center inserts before it, right inserts after — the 间隙 drop.</summary>
-    private (IntPtr target, bool before)? FindGapInsert(Point p)
+    private (FrameworkElement card, IntPtr target, bool before)? FindGapInsert(Point p)
     {
         FrameworkElement? best = null;
         double bestD = double.MaxValue;
@@ -1371,16 +1507,160 @@ public partial class SwitcherOverlay : Window
             best = card;
             before = p.X < pos.X + card.ActualWidth / 2;
         }
-        return best?.DataContext is OverlayWindow ow ? (ow.Hwnd, before) : null;
+        return best?.DataContext is OverlayWindow ow ? (best, ow.Hwnd, before) : null;
     }
 
     private void EndDrag()
     {
         if (_dragItem is not null && DragCard(_dragItem) is { } b) b.Opacity = 1;
+        _captureElt?.ReleaseMouseCapture(); // no-op when not captured
+        _captureElt = null;
         _dragItem = null;
         _dragHwnd = IntPtr.Zero;
         _dragActive = false;
         _dragFromFanStrip = false;
+        HideDropIndicators();
+    }
+
+    // ---------- Drag feedback (拖拽动效: 左/右竖线、里面高亮、剥离) ----------
+    // The DropLayer Canvas mirrors every drag position: a blue vertical
+    // line at the target card's left/right edge (排序), a group-colored
+    // glow around the card (里面 = 集中), and a 剥离 chip trailing the
+    // cursor when the release would detach the member from its stack.
+    private Border? _glowCard;
+
+    private void OnOverlayDragMove(object sender, MouseEventArgs e)
+    {
+        if (!_dragActive) return;
+        if (e.LeftButton != MouseButtonState.Pressed) { EndDrag(); return; }
+        var p = e.GetPosition(WindowsList);
+        var card = CardAt(p);
+        if (card is not null)
+        {
+            var vm = card.DataContext as OverlayWindow;
+            var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            double? lineX = null;
+            if (_dragFromFanStrip && vm is not null
+                && _controller.StackInfoFor(vm.Hwnd) is { } st
+                && CascadeRegion(st, card.ActualWidth, p.X - pos.X) is { } r)
+            {
+                // Member in hand over a cascade: preview the exact member
+                // boundary — the line that 标签内部排序 will drop at.
+                var peek = card.ActualWidth / (st.Members.Count + 1);
+                var visW = r.index == st.Members.Count - 1
+                    ? card.ActualWidth - r.index * peek : peek;
+                lineX = pos.X + r.index * peek + (r.before ? 0 : visW);
+            }
+            else
+            {
+                var rel = (p.X - pos.X) / Math.Max(card.ActualWidth, 1);
+                if (rel < 0.25) lineX = pos.X;                         // 左竖线
+                else if (rel > 0.75) lineX = pos.X + card.ActualWidth; // 右竖线
+                else { ShowStackGlow(card); HideLine(); return; }      // 里面
+            }
+            HideStackGlow();
+            ShowLine(lineX.Value, pos.Y, card.ActualHeight);
+            return;
+        }
+        HideLine();
+        HideStackGlow();
+        if ((_dragFromFanStrip && !_controller.IsInStackView)
+            || (_controller.IsInStackView && !InCardGrid(p)))
+        {
+            // Off the cards in peel mode (cascade member dragged out, or
+            // sub view outside the card area): the release will detach it.
+            // Clamped to the layer so the chip stays visible even when the
+            // cursor itself has left the window (capture keeps the drag).
+            var pr = e.GetPosition(DropLayer);
+            PeelChip.Visibility = Visibility.Visible;
+            var cx = pr.X + 14;
+            var cy = pr.Y + 12;
+            cx = Math.Max(4, Math.Min(cx, DropLayer.ActualWidth - PeelChip.ActualWidth - 4));
+            cy = Math.Max(4, Math.Min(cy, DropLayer.ActualHeight - PeelChip.ActualHeight - 4));
+            Canvas.SetLeft(PeelChip, cx);
+            Canvas.SetTop(PeelChip, cy);
+            return;
+        }
+        if (FindGapInsert(p) is { } g)
+        {
+            var gpos = g.card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            ShowLine(g.before ? gpos.X : gpos.X + g.card.ActualWidth,
+                     gpos.Y, g.card.ActualHeight);
+        }
+    }
+
+    /// <summary>The template card under the grid point, if any.</summary>
+    private Border? CardAt(Point p)
+    {
+        for (var i = 0; i < _windows.Count; i++)
+        {
+            if (WindowsList.ItemContainerGenerator.ContainerFromIndex(i) is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border card) continue;
+            var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            if (p.X >= pos.X && p.X <= pos.X + card.ActualWidth
+                && p.Y >= pos.Y && p.Y <= pos.Y + card.ActualHeight)
+                return card;
+        }
+        return null;
+    }
+
+    /// <summary>True while the point stays near the card area (union of the
+    /// template cards + 24px slack). Peel-off (剥离) is judged against this,
+    /// not the WindowsList rect — the ItemsControl rectangle fills the whole
+    /// panel, which would make "outside the grid" unreachable.</summary>
+    private bool InCardGrid(Point p)
+    {
+        double minX = double.MaxValue, minY = double.MaxValue, maxX = 0, maxY = 0;
+        for (var i = 0; i < _windows.Count; i++)
+        {
+            if (WindowsList.ItemContainerGenerator.ContainerFromIndex(i) is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not FrameworkElement card) continue;
+            var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            minX = Math.Min(minX, pos.X);
+            minY = Math.Min(minY, pos.Y);
+            maxX = Math.Max(maxX, pos.X + card.ActualWidth);
+            maxY = Math.Max(maxY, pos.Y + card.ActualHeight);
+        }
+        if (maxX <= 0) return false;
+        return p.X >= minX - 24 && p.X <= maxX + 24
+            && p.Y >= minY - 24 && p.Y <= maxY + 24;
+    }
+
+    private void ShowLine(double x, double y, double h)
+    {
+        LineIndicator.Visibility = Visibility.Visible;
+        Canvas.SetLeft(LineIndicator, x - 2);
+        Canvas.SetTop(LineIndicator, y);
+        LineIndicator.Height = h;
+    }
+
+    private void HideLine() => LineIndicator.Visibility = Visibility.Collapsed;
+
+    private void ShowStackGlow(Border card)
+    {
+        if (ReferenceEquals(_glowCard, card)) return;
+        HideStackGlow();
+        card.BorderBrush = card.DataContext is OverlayWindow ow
+            && _accentMap.TryGetValue(ow.GroupKey, out var c)
+                ? new System.Windows.Media.SolidColorBrush(c)
+                : System.Windows.Media.Brushes.DodgerBlue;
+        card.BorderThickness = new Thickness(3);
+        _glowCard = card;
+    }
+
+    private void HideStackGlow()
+    {
+        if (_glowCard is null) return;
+        _glowCard.ClearValue(Border.BorderBrushProperty);
+        _glowCard.ClearValue(Border.BorderThicknessProperty);
+        _glowCard = null;
+    }
+
+    private void HideDropIndicators()
+    {
+        HideLine();
+        HideStackGlow();
+        PeelChip.Visibility = Visibility.Collapsed;
     }
 
     // ---------- Fan strip drag (主页面堆叠的侧边条 = 非首位成员) ----------

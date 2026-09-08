@@ -24,7 +24,8 @@
             Padding="16"
             SnapsToDevicePixels="True"
             UseLayoutRounding="True"
-            MouseLeftButtonUp="OnOverlayMouseUp">
+            MouseLeftButtonUp="OnOverlayMouseUp"
+            MouseMove="OnOverlayDragMove">
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
@@ -151,7 +152,8 @@
                                            Margin="14,3,14,0"
                                            RadiusX="1.5" RadiusY="1.5"
                                            Fill="{Binding GroupStripBrush}"/>
-                            <StackPanel>
+                            <StackPanel MouseEnter="OnHeadHoverEnter"
+                                        MouseLeave="OnHeadHoverLeave">
                                 <Grid Margin="8,7,8,7">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
                                         <!-- Slot number badge sits top-left, in
@@ -291,6 +293,28 @@
                 </ItemsControl.ItemTemplate>
                 </ItemsControl>
             </ScrollViewer>
+            <!-- Drag feedback layer (拖拽动效): insertion line for
+                 左/右 zones, glow outline for 里面 (集中), peel chip
+                 while dragging a member out of its stack. -->
+            <Canvas x:Name="DropLayer"
+                    Grid.Row="1"
+                    IsHitTestVisible="False">
+                <Rectangle x:Name="LineIndicator"
+                           Width="4"
+                           RadiusX="2" RadiusY="2"
+                           Fill="#FF0078D4"
+                           Visibility="Collapsed"/>
+                <Border x:Name="PeelChip"
+                        Background="#FF0078D4"
+                        CornerRadius="8"
+                        Padding="8,3"
+                        Visibility="Collapsed">
+                    <TextBlock Text="剥离"
+                               FontSize="11"
+                               FontWeight="Bold"
+                               Foreground="White"/>
+                </Border>
+            </Canvas>
         </Grid>
     </Border>
 </Window>
