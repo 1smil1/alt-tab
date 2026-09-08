@@ -29,4 +29,10 @@
     <None Include="Tools\启动窗口切换器.bat" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 轻量常驻: GC 堆软上限 128MB — GC 逼近限值时更激进回收,
+         防止长日常使用中 managed heap 无感爬升. -->
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="0x08000000" />
+  </ItemGroup>
+
 </Project>

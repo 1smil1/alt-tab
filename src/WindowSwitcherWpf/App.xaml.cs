@@ -14,7 +14,6 @@ public partial class App : Application
     private static readonly Mutex? SingleInstanceMutex;
 
     private KeyboardHook? _keyboard;
-    private ForegroundWatcher? _foreground;
     private OrderStore? _orderStore;
     private WindowGroupingService? _grouping;
     private SwitcherController? _controller;
@@ -168,9 +167,6 @@ public partial class App : Application
         _keyboard.QuickJumpDown += OnQuickJumpDown;
         _keyboard.QuickJumpUp += OnQuickJumpUp;
         _keyboard.Install();
-
-        _foreground = new ForegroundWatcher();
-        _foreground.Install();
 
         // 轻量化: no tray icon, no taskbar presence — the resident exe IS
         // the app. Close it with 关闭应用.bat, remove it with 卸载.bat.
@@ -768,7 +764,6 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        _foreground?.Dispose();
         _keyboard?.Dispose();
         SingleInstanceMutex?.ReleaseMutex();
         SingleInstanceMutex?.Dispose();

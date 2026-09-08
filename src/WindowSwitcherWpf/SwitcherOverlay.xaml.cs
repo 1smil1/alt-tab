@@ -198,6 +198,11 @@ public partial class SwitcherOverlay : Window
             if (pidU == 0) dead.Add(kv.Key);
         }
         foreach (var h in dead) s_visualCache.Remove(h);
+        // 压实 LOH: 缩略图/位图字节数组住在大对象堆, 只标记不压实的话
+        // 那些页永远 committed (private 只涨不降) — compact once 让下一
+        // 次 GC 归还它们.
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+            System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
