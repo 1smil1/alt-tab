@@ -29,6 +29,7 @@ public partial class SwitcherOverlay : Window
     public SwitcherOverlay(SwitcherController controller)
     {
         _controller = controller;
+        _controller.MoveRejectedByPin += OnMoveRejectedByPin;
         InitializeComponent();
         DataContext = this;
         WindowsList.ItemsSource = _windows;
@@ -312,6 +313,8 @@ public partial class SwitcherOverlay : Window
                     // not the shared slot digit; Alt+digit maps 1..9→0..8,
                     // 0→9th, matching SelectByDigit.
                     SlotBadge = RelativeMemberDigit(idx),
+                    // 固定子标签在子页面同样亮黄框 (alt 3 进入看到同样语义).
+                    IsPinned = _controller.IsMemberPinned(m.Hwnd),
                 };
                 var cached = LookupCache(ow.Hwnd);
                 if (cached is not null)
@@ -1057,11 +1060,28 @@ public partial class SwitcherOverlay : Window
             foreach (var old in _cascadeSubs.Values)
                 if (old.Parent is Panel p) p.Children.Remove(old);
             _cascadeSubs.Clear();
+            _subTools.Clear();
+            foreach (var host in _headToolHosts.Values) DropLayer.Children.Remove(host);
+            _headToolHosts.Clear();
+            _mainTools.Clear();
+            foreach (var b in _pinOutlines.Values) DropLayer.Children.Remove(b);
+            _pinOutlines.Clear();
             if (!_isOpen || _controller.IsInStackView) return;
+            // Idempotence guard: the same head hwnd must yield exactly ONE
+            // cascade. A duplicate flat entry would otherwise register the
+            // second set of subs under the same dictionary keys, leaving
+            // the first set as unpositioned orphans at (0,0).
+            var seenHeads = new HashSet<IntPtr>();
             foreach (var ow in _windows)
             {
                 if (_controller.StackInfoFor(ow.Hwnd) is not { } st
                     || st.Members.Count < 2) continue;
+                if (!seenHeads.Add(ow.Hwnd))
+                {
+                    WindowSwitcherWpf.Services.Log.Info("Cascade.Build",
+                        $"duplicate head skipped: 0x{ow.Hwnd.ToInt64():X}");
+                    continue;
+                }
             if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
                 is not ContentPresenter cp) continue;
             if (WindowsList.ItemTemplate?.FindName("CardRoot", cp) is not Grid root) continue;
@@ -1076,9 +1096,33 @@ public partial class SwitcherOverlay : Window
             {
                 var m = st.Members[i];
                 var sub = BuildCascadeCard(m, ow.ThumbWidth, cardW,
-                    i * peek, accent, i == st.Members.Count - 1);
+                    i * peek, accent, i == st.Members.Count - 1, ow.Hwnd);
                 DropLayer.Children.Add(sub);
             }
+            // The head zone (第一个子标签的可视区 [0, peek)) gets the same
+            // hover tool pair as every other member — hosted in DropLayer so
+            // it can sit at the patch's right end (the head CARD is only
+            // thumb-wide; the tools must sit near x=peek, over the card).
+            var headHost = new Border
+            {
+                // Opaque white patch (白色方框呈现固定/✕, same as the sub
+                // strips) — it covers the title tail on hover, so the tools
+                // stay readable over long titles.
+                Background = System.Windows.Media.Brushes.White,
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(2),
+                Visibility = Visibility.Collapsed,
+            };
+            var hsp = new StackPanel { Orientation = Orientation.Horizontal };
+            var headPin = MakeCascadeTool(ow.Hwnd, "📌", "固定此子标签 (首个)",
+                OnCascadeMemberPinClick, MemberPinBrush(ow.Hwnd));
+            var headClose = MakeCascadeTool(ow.Hwnd, "✕", "关闭此窗口",
+                OnCascadeCloseClick, SubCloseBrush);
+            hsp.Children.Add(headPin);
+            hsp.Children.Add(headClose);
+            headHost.Child = hsp;
+            DropLayer.Children.Add(headHost);
+            _headToolHosts[ow.Hwnd] = headHost;
         }
         // Position the cascade subs in DropLayer coords once the head card
         // has its real screen rect. The first pass may not have all head
@@ -1086,6 +1130,8 @@ public partial class SwitcherOverlay : Window
         // re-queues itself at Background priority until every head's
         // ActualWidth > 0 or the pass cap is hit.
         _layoutPassesRemaining = 30;
+        WindowSwitcherWpf.Services.Log.Info("Cascade.Build",
+            $"built subs={_cascadeSubs.Count} hosts={_headToolHosts.Count} mainTools={_mainTools.Count}");
         Dispatcher.BeginInvoke(new Action(LayoutCascades), DispatcherPriority.Background);
         Dispatcher.BeginInvoke(new Action(LayoutCascades), DispatcherPriority.ApplicationIdle);
         }
@@ -1121,6 +1167,11 @@ public partial class SwitcherOverlay : Window
                 _baseContainerMargins[cp] = baseMargin = cp.Margin;
             var cardW = ow.ThumbWidth + 16;
             var peek = cardW / 2;
+            // Head title trims with "…" inside the exposed head patch
+            // ([0, peek)) instead of being hard-cut by the first sub card
+            // (badge 23 + stack badge 29 + icon 20 + margins 15 ≈ 87 left).
+            if (WindowsList.ItemTemplate?.FindName("TitleText", cp) is TextBlock tt)
+                tt.MaxWidth = stacked ? Math.Max(peek - 91, 30) : 230;
             var extra = stacked ? (st.Members.Count - 1) * peek : 0;
             var target = new Thickness(baseMargin.Left, baseMargin.Top,
                 baseMargin.Right + extra, baseMargin.Bottom);
@@ -1136,13 +1187,25 @@ public partial class SwitcherOverlay : Window
                 .Transform(new Point(0, 0));
             for (var i = 1; i < st.Members.Count; i++)
             {
-                if (!_cascadeSubs.TryGetValue(st.Members[i].Hwnd, out var sub)) continue;
+                if (!_cascadeSubs.TryGetValue(st.Members[i].Hwnd, out var sub))
+                {
+                    WindowSwitcherWpf.Services.Log.Info("Cascade.Layout",
+                        $"sub missing: head=0x{ow.Hwnd.ToInt64():X} member=0x{st.Members[i].Hwnd.ToInt64():X} dict={_cascadeSubs.Count}");
+                    continue;
+                }
                 Canvas.SetLeft(sub, headTl.X + i * peek);
                 Canvas.SetTop(sub, headTl.Y);
                 // Match the head card's height exactly so the folded row
                 // reads as one aligned stack (the 200px default in
                 // BuildCascadeCard is just the pre-layout fallback).
                 if (headCard.ActualHeight > 0) sub.Height = headCard.ActualHeight;
+            }
+            // Head-zone tool host: right end of the exposed head patch
+            // ([0, peek)), aligned with the title strip (top margin ~7px).
+            if (_headToolHosts.TryGetValue(ow.Hwnd, out var host))
+            {
+                Canvas.SetLeft(host, headTl.X + peek - 52);
+                Canvas.SetTop(host, headTl.Y + 5);
             }
         }
         // If any head wasn't laid out yet — or a margin change just
@@ -1159,15 +1222,19 @@ public partial class SwitcherOverlay : Window
         // has actually moved the subs (PointToScreen still returns the OLD
         // position until layout runs, so this must be queued after it).
         Dispatcher.BeginInvoke(new Action(UpdateLiveRects), DispatcherPriority.Loaded);
+        // Pin frames follow the union geometry — but only once the final
+        // positions are known (after UpdateLiveRects' own layout settle).
+        Dispatcher.BeginInvoke(new Action(UpdatePinOutlines), DispatcherPriority.Loaded);
     }
     private int _layoutPassesRemaining;
     private readonly Dictionary<ContentPresenter, Thickness> _baseContainerMargins = new();
 
     /// <summary>One overlapped member card: title strip + half-visible
     /// live preview. Plain click = 直达, drag = that member (peel/re-stack).
-    /// The last member also carries the pin/close tools.</summary>
+    /// Every member carries hover tools at its region's right end; the LAST
+    /// member additionally carries the MAIN stack tools (深色, rightmost).</summary>
     private Border BuildCascadeCard(WindowEntry m, double thumbW, double cardW,
-        double offsetX, System.Windows.Media.Color accent, bool last)
+        double offsetX, System.Windows.Media.Color accent, bool last, IntPtr headHwnd)
     {
         // Sub card lives in DropLayer, positioned absolutely by
         // LayoutCascades using Canvas.SetLeft/Top. A Canvas does NOT
@@ -1176,24 +1243,27 @@ public partial class SwitcherOverlay : Window
         // a 0-height sliver and is invisible.
         //   title strip ≈ 32px (icon row) + 150 thumb + ~14 margins ≈ 196.
         var peek = cardW / 2;
-        // The last sub renders the full cardW so the title can span the
-        // whole row — but the strip also carries two 20px tool buttons
-        // (pin/close) plus the 20px icon and the 7px margins on either
-        // side of the text. Reserve 90px for tools so the text never
-        // gets pushed under them.
-        var titleRoom = last ? Math.Max(cardW - 90, 60) : Math.Max(peek - 20, 30);
+        // The strip is a Grid so the tool cluster RIGHT-aligns to the
+        // member's visible region edge (用户实测: 主📌/✕ 要贴 last 卡右缘,
+        // 不跟在标题后). The last sub renders the full cardW row with FOUR
+        // 20px tools (子📌✕ + 主📌✕, 88px + buffer = 125); other members'
+        // regions are one peek wide with two tools (44px + buffer = 72).
+        var stripWidth = last ? Math.Max(cardW - 16, 60) : Math.Max(peek - 8, 40);
+        var titleRoom = last ? Math.Max(stripWidth - 125, 30) : Math.Max(stripWidth - 72, 30);
         var thumbRoom = last ? Math.Max(thumbW, peek + 20) : Math.Max(peek, 60);
         const double subHeight = 200; // title strip (32) + thumb (150) + bottom margin (14) + breathing room
-        var strip = new StackPanel
+        var strip = new Grid
         {
-            Orientation = Orientation.Horizontal,
+            Width = stripWidth,
             HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(8, 7, 8, 7),
+            Margin = new Thickness(8, 7, 0, 7),
         };
         var icon = new Image
         {
-            Width = 20, Height = 20, VerticalAlignment = VerticalAlignment.Center,
+            Width = 20, Height = 20,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
             Source = LookupCache(m.Hwnd)?.Icon,
         };
         System.Windows.Media.RenderOptions.SetBitmapScalingMode(icon,
@@ -1203,16 +1273,44 @@ public partial class SwitcherOverlay : Window
         {
             Text = m.Title, FontSize = 12, FontWeight = FontWeights.SemiBold,
             Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x20, 0x20, 0x20)),
+            HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(7, 0, 0, 0),
+            Margin = new Thickness(27, 0, 0, 0),
             MaxWidth = titleRoom,
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
+        Border? pinTool = null, closeTool = null;
+        // Every member's visible region carries HOVER-ONLY tools at its
+        // region's right top corner (区域右上角). The last member appends
+        // the MAIN stack tools (主📌 深黄固定态 / 主✕ 深红解散) rightmost —
+        // 指向任意子标签时它们一起亮起.
+        var tools = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        pinTool = MakeCascadeTool(m.Hwnd, "📌", "固定此子标签",
+            OnCascadeMemberPinClick, MemberPinBrush(m.Hwnd));
+        closeTool = MakeCascadeTool(m.Hwnd, "✕", "关闭此窗口",
+            OnCascadeCloseClick, SubCloseBrush);
+        pinTool.Opacity = 0;
+        closeTool.Opacity = 0;
+        tools.Children.Add(pinTool);
+        tools.Children.Add(closeTool);
         if (last)
         {
-            strip.Children.Add(MakeCascadeTool(m.Hwnd, "📌", "固定此堆叠", OnCascadePinClick));
-            strip.Children.Add(MakeCascadeTool(m.Hwnd, "✕", "关闭此窗口", OnCascadeCloseClick));
+            var mainPin = MakeCascadeTool(headHwnd, "📌", "固定/取消固定整个堆叠",
+                OnCascadePinClick, StackPinBrush(headHwnd));
+            var mainClose = MakeCascadeTool(headHwnd, "✕", "解散堆叠 (取消所有子标签固定)",
+                OnCascadeDissolveClick, MainCloseBrush);
+            mainPin.Opacity = 0;
+            mainClose.Opacity = 0;
+            tools.Children.Add(mainPin);
+            tools.Children.Add(mainClose);
+            _mainTools[headHwnd] = (mainPin, mainClose);
         }
+        strip.Children.Add(tools);
         var thumb = new Border
         {
             Height = 150,
@@ -1264,6 +1362,8 @@ public partial class SwitcherOverlay : Window
         // hover tracker and the drag handler.
         sub.MouseMove += OnCascadeSubMove;
         sub.MouseLeftButtonUp += OnCascadeUp;
+        if (pinTool is not null && closeTool is not null)
+            _subTools[sub] = (pinTool, closeTool);
         return sub;
     }
 
@@ -1279,7 +1379,7 @@ public partial class SwitcherOverlay : Window
     }
 
     private static Border MakeCascadeTool(IntPtr hwnd, string glyph, string tip,
-        MouseButtonEventHandler up)
+        MouseButtonEventHandler up, System.Windows.Media.Brush? fg = null)
     {
         var b = new Border
         {
@@ -1294,13 +1394,32 @@ public partial class SwitcherOverlay : Window
         b.MouseLeftButtonUp += up;
         b.Child = new TextBlock
         {
-            Text = glyph, FontSize = 10,
-            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x61, 0x61, 0x61)),
+            Text = glyph, FontSize = 12,
+            Foreground = fg ?? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x61, 0x61, 0x61)),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
         };
         return b;
     }
+
+    // Tool palette (工具配色): sub tools read light, MAIN tools read dark —
+    // 悬停时一眼区分主/子标签的固定与叉叉. Pinned states turn yellow:
+    // 子固定=黄, 主固定=更深的黄.
+    private static System.Windows.Media.Brush Rgb(byte r, byte g, byte b) =>
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(r, g, b));
+
+    private static readonly System.Windows.Media.Brush SubCloseBrush = Rgb(0x61, 0x61, 0x61);
+    private static readonly System.Windows.Media.Brush MainCloseBrush = Rgb(0xB3, 0x26, 0x1E); // 解散=深红
+    private static readonly System.Windows.Media.Brush MemberPinPinnedBrush = Rgb(0xD9, 0x77, 0x06);   // 子固定=黄
+    private static readonly System.Windows.Media.Brush MemberPinFreeBrush = Rgb(0x75, 0x75, 0x75);     // 子未固定=中灰 (纯白在白卡上不可见 — 用户实测反馈)
+    private static readonly System.Windows.Media.Brush StackPinPinnedBrush = Rgb(0xB4, 0x53, 0x09);    // 主固定=深黄
+    private static readonly System.Windows.Media.Brush StackPinFreeBrush = Rgb(0x33, 0x33, 0x33);      // 主未固定=深灰
+
+    private System.Windows.Media.Brush MemberPinBrush(IntPtr h) =>
+        _controller.IsMemberPinned(h) ? MemberPinPinnedBrush : MemberPinFreeBrush;
+
+    private System.Windows.Media.Brush StackPinBrush(IntPtr head) =>
+        _controller.IsStackPinned(head) ? StackPinPinnedBrush : StackPinFreeBrush;
 
     /// <summary>Digit shown for a relative member index: 1..9, 0 = 10th
     /// (same mapping SelectByDigit uses for Alt+digit).</summary>
@@ -1357,9 +1476,12 @@ public partial class SwitcherOverlay : Window
         {
             var tl = c.headCard.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var r = CascadeRegion(c.st, c.head.ThumbWidth + 16, p.X - tl.X);
+            var movedC = false;
             if (r is { } reg && c.st.Members[reg.index].Hwnd != dragHwnd)
-                _controller.StackDrop(dragHwnd, c.st.Members[reg.index].Hwnd, reg.before);
-            RebuildFromSlots(preserveScroll: true);
+                movedC = _controller.StackDrop(dragHwnd, c.st.Members[reg.index].Hwnd, reg.before);
+            // A pin-rejected drop must NOT rebuild — the fresh containers
+            // would replace the flashed pin frame (同 OnOverlayMouseUp).
+            if (movedC) RebuildFromSlots(preserveScroll: true);
             return;
         }
         var card = CardAt(p);
@@ -1368,8 +1490,9 @@ public partial class SwitcherOverlay : Window
         {
             var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var relPt = new Point(p.X - pos.X, p.Y - pos.Y);
-            _controller.StackDrop(dragHwnd, t.Hwnd, before: relPt.X < card.ActualWidth / 2);
-            RebuildFromSlots(preserveScroll: true);
+            // Same guard: rejected drop keeps the flash alive, no rebuild.
+            if (_controller.StackDrop(dragHwnd, t.Hwnd, before: relPt.X < card.ActualWidth / 2))
+                RebuildFromSlots(preserveScroll: true);
             return;
         }
         if (_controller.PeelFromStack(dragHwnd))
@@ -1446,13 +1569,10 @@ public partial class SwitcherOverlay : Window
     /// stackOutline=true — draw a single blue border around the cascade's
     /// outermost edge. Two independent visual states; only one is active
     /// at a time (outline takes precedence).</summary>
-    private void SetCascadeHover(IntPtr hwnd, bool on, bool stackOutline = false)
+    private void SetCascadeHover(IntPtr hwnd, bool on, bool headZone = false)
     {
         if (on)
         {
-            // Mutually exclusive: a sub hover hides the head's outline.
-            if (!stackOutline) HideStackOutline();
-
             // Always restore the previous sub's background first (cheap
             // when re-entering same hwnd). This is the single source of
             // truth — WPF MouseLeave doesn't always fire on rapid jumps.
@@ -1460,31 +1580,46 @@ public partial class SwitcherOverlay : Window
                 RestoreCascadeSub(_hoverSub);
             _hoverSub = null;
             _hoverHwnd = IntPtr.Zero;
+            HideAllStackTools(except: hwnd);
 
-            if (stackOutline)
+            if (headZone)
             {
-                if (_windows.FirstOrDefault(w => w.Hwnd == hwnd) is OverlayWindow headVm
-                    && _controller.StackInfoFor(hwnd) is { } st
-                    && st.Members.Count >= 2
-                    && FindCascadeContainer(headVm) is FrameworkElement root)
+                // Head patch hover: the head zone's own 📌/✕ (DropLayer
+                // host at the patch's right end) + the MAIN stack tools on
+                // the last sub. No blue union outline — the permanent pin
+                // frame and the selection frame own the borders.
+                if (_headToolHosts.TryGetValue(hwnd, out var host))
+                    host.Visibility = Visibility.Visible;
+                if (_mainTools.TryGetValue(hwnd, out var m))
                 {
-                    ShowStackOutline(root, headVm, st);
+                    m.pin.Opacity = 1;
+                    m.close.Opacity = 1;
                 }
                 return;
             }
 
-            // Sub hover = subtle background highlight (no border). One at a
-            // time so the previous one never lingers.
+            // Sub hover = subtle background highlight + that sub's 📌/✕ +
+            // the MAIN stack tools (指向任意子标签 → 主标签标志都出现).
             if (_cascadeSubs.TryGetValue(hwnd, out var sub))
             {
                 sub.Background = HoveredSubBackground;
+                if (_subTools.TryGetValue(sub, out var t))
+                {
+                    t.pin.Opacity = 1;
+                    t.close.Opacity = 1;
+                }
                 _hoverSub = sub;
                 _hoverHwnd = hwnd;
+                var head = StackHeadOf(hwnd);
+                if (head != IntPtr.Zero && _mainTools.TryGetValue(head, out var mt))
+                {
+                    mt.pin.Opacity = 1;
+                    mt.close.Opacity = 1;
+                }
             }
         }
         else
         {
-            if (stackOutline) { HideStackOutline(); return; }
             // Clear the previous highlight unconditionally on any off call.
             // The global pointer tracker (UpdateCascadeHoverFromPointer)
             // calls off with the previous hwnd OR with Zero to mean "not
@@ -1494,45 +1629,49 @@ public partial class SwitcherOverlay : Window
                 if (_hoverSub is not null) RestoreCascadeSub(_hoverSub);
                 _hoverSub = null;
                 _hoverHwnd = IntPtr.Zero;
+                HideAllStackTools(except: IntPtr.Zero);
             }
         }
     }
 
-    // ---------- Stack outer outline (整堆叠最外围一条蓝框) ----------
-    // Windows-11 native cascade: hover the head's exposed top-left patch
-    // (== first sub's left peek) → draw a single blue rectangle around the
-    // entire cascade's outermost edge. Implemented as a Border sized to
-    // the sub-cards' union rectangle, sitting in DropLayer (IsHitTestVisible
-    // = False so it never steals pointer events from sub-cards).
-    private Border? _stackOutline; // lazily created in DropLayer
-    private IntPtr _stackOutlinedHwnd;
-
-    private Border EnsureStackOutline()
+    /// <summary>Hide every stack's hover tool groups (head-zone hosts via
+    /// Visibility so they stop intercepting head-card clicks; main tools on
+    /// the last sub via opacity), optionally sparing one stack.</summary>
+    private void HideAllStackTools(IntPtr except)
     {
-        if (_stackOutline is null)
+        foreach (var (head, host) in _headToolHosts)
+            host.Visibility = head == except ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var (head, m) in _mainTools)
         {
-            _stackOutline = new Border
-            {
-                BorderBrush = CascadeHoverBrush,
-                BorderThickness = new Thickness(2),
-                CornerRadius = new CornerRadius(8),
-                Background = System.Windows.Media.Brushes.Transparent,
-                Visibility = Visibility.Collapsed,
-                IsHitTestVisible = false,
-            };
-            DropLayer.Children.Add(_stackOutline);
+            var o = head == except ? 1.0 : 0.0;
+            m.pin.Opacity = o;
+            m.close.Opacity = o;
         }
-        return _stackOutline;
     }
 
-    private void ShowStackOutline(FrameworkElement root, OverlayWindow headVm,
-        SwitcherController.WindowStackInfo st)
+    /// <summary>The stack head that owns <paramref name="memberHwnd"/> as a
+    /// folded member, Zero when it is not a cascade member.</summary>
+    private IntPtr StackHeadOf(IntPtr memberHwnd)
     {
-        var outline = EnsureStackOutline();
-        outline.Visibility = Visibility.Visible;
-        // Compute the union of the head's full card (in WindowsList coords)
-        // + every sub card, all also in WindowsList coords. The outermost
-        // left edge is the head's x0, the right is the last sub's x1.
+        foreach (var ow in _windows)
+            if (_controller.StackInfoFor(ow.Hwnd) is { } st
+                && st.Members.Any(m => m.Hwnd == memberHwnd))
+                return ow.Hwnd;
+        return IntPtr.Zero;
+    }
+
+    // ---------- Stack outer outline ----------
+    // The hover-time blue union outline was removed (取消悬停蓝框): borders
+    // now belong to the selection frame and the permanent pin frame only.
+    // The union-rect math below survives as StackOutlineRect, feeding the
+    // permanent pin outlines.
+
+    /// <summary>Union rect of the head card + every sub card, in DropLayer
+    /// coords with a 2px outset — the cascade's outermost edge. Shared by
+    /// the hover outline (蓝) and the permanent pin outlines (橙).</summary>
+    private (double x, double y, double w, double h)? StackOutlineRect(
+        FrameworkElement root, OverlayWindow headVm, SwitcherController.WindowStackInfo st)
+    {
         var headTl = root.TransformToVisual(WindowsList).Transform(new Point(0, 0));
         var headBr = root.TransformToVisual(WindowsList).Transform(
             new Point(root.ActualWidth, root.ActualHeight));
@@ -1548,25 +1687,122 @@ public partial class SwitcherOverlay : Window
             maxX = Math.Max(maxX, br.X);
             maxY = Math.Max(maxY, br.Y);
         }
-        // Convert to DropLayer coords. Slight outset so the border sits on
-        // the edge instead of inside it.
-        var layer = DropLayer;
-        var origin = layer.TransformToVisual(WindowsList).Inverse.Transform(new Point(0, 0));
-        var dx = minX - origin.X - 2;
-        var dy = minY - origin.Y - 2;
-        var dw = (maxX - minX) + 4;
-        var dh = (maxY - minY) + 4;
-        Canvas.SetLeft(outline, dx);
-        Canvas.SetTop(outline, dy);
-        outline.Width = dw;
-        outline.Height = dh;
-        _stackOutlinedHwnd = headVm.Hwnd;
+        var origin = DropLayer.TransformToVisual(WindowsList).Inverse.Transform(new Point(0, 0));
+        return (minX - origin.X - 2, minY - origin.Y - 2,
+            (maxX - minX) + 4, (maxY - minY) + 4);
     }
 
-    private void HideStackOutline()
+    // ---------- Permanent pin outlines (固定橙框, 恒显) ----------
+    // One orange frame per PINNED stack, drawn in DropLayer over the folded
+    // cascade; refreshed after every layout pass. Plain pinned cards get
+    // their frame from the template trigger instead.
+    private readonly Dictionary<IntPtr, Border> _pinOutlines = new();
+
+    private static readonly System.Windows.Media.Brush PinOutlineBrush =
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xD9, 0x77, 0x06));
+
+    private Border EnsurePinOutline(IntPtr hwnd)
     {
-        if (_stackOutline is not null) _stackOutline.Visibility = Visibility.Collapsed;
-        _stackOutlinedHwnd = IntPtr.Zero;
+        if (!_pinOutlines.TryGetValue(hwnd, out var b))
+        {
+            b = new Border
+            {
+                BorderBrush = PinOutlineBrush,
+                BorderThickness = new Thickness(3),
+                CornerRadius = new CornerRadius(10),
+                Background = System.Windows.Media.Brushes.Transparent,
+                IsHitTestVisible = false,
+            };
+            DropLayer.Children.Add(b);
+            _pinOutlines[hwnd] = b;
+        }
+        return b;
+    }
+
+    /// <summary>Re-sync the permanent pin frames with the current windows:
+    /// pinned stacks get their union-rect outline, stale ones are removed.</summary>
+    private void UpdatePinOutlines()
+    {
+        var keep = new HashSet<IntPtr>();
+        foreach (var ow in _windows)
+        {
+            if (_controller.StackInfoFor(ow.Hwnd) is not { Members.Count: >= 2 } st) continue;
+            if (!_controller.IsStackPinned(ow.Hwnd)) continue;
+            if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
+                is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border headCard) continue;
+            if (headCard.ActualWidth <= 0) continue;
+            if (StackOutlineRect(headCard, ow, st) is not { } r) continue;
+            var b = EnsurePinOutline(ow.Hwnd);
+            Canvas.SetLeft(b, r.x);
+            Canvas.SetTop(b, r.y);
+            b.Width = r.w;
+            b.Height = r.h;
+            b.Visibility = Visibility.Visible;
+            keep.Add(ow.Hwnd);
+        }
+        foreach (var k in _pinOutlines.Keys.Where(k => !keep.Contains(k)).ToList())
+        {
+            DropLayer.Children.Remove(_pinOutlines[k]);
+            _pinOutlines.Remove(k);
+        }
+    }
+
+    // ---------- 拒绝反馈: 叮 + 突显固定外框 ----------
+    // A move that would displace a pinned card is rejected by the
+    // controller (固定卡编号不可被挤走). Make the reason visible: a ding,
+    // then the blocking pin's frame flashes red for a few seconds.
+
+    private static readonly System.Windows.Media.Brush PinFlashBrush =
+        new System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromRgb(0xE8, 0x11, 0x23));
+
+    private void OnMoveRejectedByPin(IntPtr pinHwnd)
+    {
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"move rejected feedback: ding + flash pin hwnd=0x{pinHwnd.ToInt64():X}");
+        System.Media.SystemSounds.Asterisk.Play(); // 叮
+        FlashPin(pinHwnd);
+    }
+
+    /// <summary>Resolve the visual that owns a pin's frame — the permanent
+    /// union outline (pinned stack), the cascade sub card (pinned member),
+    /// or the template card (pinned plain card) — and flash it red.</summary>
+    private void FlashPin(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        Border? b = null;
+        if (_pinOutlines.TryGetValue(hwnd, out var outline)) b = outline;
+        else if (_cascadeSubs.TryGetValue(hwnd, out var sub)) b = sub;
+        else if (_windows.FirstOrDefault(w => w.Hwnd == hwnd) is { } ow
+            && WindowsList.ItemContainerGenerator.ContainerFromItem(ow) is ContentPresenter cp
+            && WindowsList.ItemTemplate?.FindName("Card", cp) is Border card) b = card;
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"flash pin 0x{hwnd.ToInt64():X}: target={(b is null ? "NOT FOUND" : b.Name is "Card" ? "template card" : b is { } x ? x.GetType().Name : "?")}");
+        if (b is null) return;
+
+        // Remember how each border value was set: template-card borders are
+        // style-trigger driven (restore via ClearValue so triggers regain
+        // control); code-built borders hold local values (restore by
+        // re-assigning the captured originals).
+        var localBrush = b.ReadLocalValue(Border.BorderBrushProperty);
+        var localThickness = b.ReadLocalValue(Border.BorderThicknessProperty);
+        var brushIsLocal = localBrush != DependencyProperty.UnsetValue;
+        var thicknessIsLocal = localThickness != DependencyProperty.UnsetValue;
+        var oldThickness = b.BorderThickness;
+        b.BorderBrush = PinFlashBrush;
+        b.BorderThickness = new Thickness(Math.Max(6, oldThickness.Left + 2));
+
+        var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.5) };
+        t.Tick += (_, _) =>
+        {
+            if (brushIsLocal) b.BorderBrush = (System.Windows.Media.Brush)localBrush;
+            else b.ClearValue(Border.BorderBrushProperty);
+            if (thicknessIsLocal) b.BorderThickness = (Thickness)localThickness;
+            else b.ClearValue(Border.BorderThicknessProperty);
+            t.Stop();
+        };
+        t.Start();
     }
 
     /// <summary>The template card's root Grid (where cascade sub-cards are
@@ -1585,7 +1821,31 @@ public partial class SwitcherOverlay : Window
     private static readonly System.Windows.Media.Brush DefaultSubBackground =
         new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF));
 
-    private void RestoreCascadeSub(Border b) => b.Background = DefaultSubBackground;
+    private void RestoreCascadeSub(Border b)
+    {
+        b.Background = DefaultSubBackground;
+        // Hover tools (📌/✕) live at the end of the sub's visible strip;
+        // they only show while the sub is hovered (一般不显示).
+        if (_subTools.TryGetValue(b, out var t))
+        {
+            t.pin.Opacity = 0;
+            t.close.Opacity = 0;
+        }
+    }
+
+    // Per-sub hover tools: pin = member pin (子标签固定), ✕ = close that
+    // window. Keyed by the sub card border; cleared on every rebuild.
+    private readonly Dictionary<Border, (Border pin, Border close)> _subTools = new();
+
+    // MAIN stack tools (主标签📌/✕) living at the end of the LAST sub's
+    // strip; shown while ANY member of that stack is hovered. Keyed by the
+    // stack head hwnd.
+    private readonly Dictionary<IntPtr, (Border pin, Border close)> _mainTools = new();
+
+    // Head-zone hover tools (第一个子标签区域的📌/✕) hosted in DropLayer;
+    // positioned by LayoutCascades at the patch's right end. Collapsed
+    // unless that stack's head zone is hovered.
+    private readonly Dictionary<IntPtr, Border> _headToolHosts = new();
 
     /// <summary>Resolve which cascade member (if any) the cursor sits over,
     /// then update the single highlighted sub. Geometry matches
@@ -1627,9 +1887,8 @@ public partial class SwitcherOverlay : Window
             }
             if (target == st.Members[0].Hwnd)
             {
-                // Back on the head patch: clear any lit sub, but leave the
-                // whole-stack outline alone — OnHeadHoverEnter/Leave owns it.
-                SetCascadeHover(IntPtr.Zero, false);
+                // Head patch: the head zone's tools + the main stack tools.
+                SetCascadeHover(target, true, headZone: true);
             }
             else
             {
@@ -1640,32 +1899,37 @@ public partial class SwitcherOverlay : Window
         SetCascadeHover(IntPtr.Zero, false);
     }
 
-    /// <summary>Hover on the head's exposed top-left patch. That patch is
-    /// the only place where the head is "visible" without a sub on top —
-    /// here we draw the whole-stack outline. Anywhere else on the head is
-    /// actually covered by a sub-card, so a sub-card hover takes over
-    /// (handled by OnCascadeMouseEnter).</summary>
-    private void OnHeadHoverEnter(object sender, MouseEventArgs e)
-    {
-        if (sender is not FrameworkElement fe || fe.DataContext is not OverlayWindow ow) return;
-        var tb = FindThumbBorder(ow) as Border;
-        if (tb is null) return;
-        var p = e.GetPosition(tb);
-        if (p.X > tb.ActualWidth / 2 || p.Y > tb.ActualHeight / 2) return;
-        SetCascadeHover(ow.Hwnd, true, stackOutline: true);
-    }
-
-    private void OnHeadHoverLeave(object sender, MouseEventArgs e)
-    {
-        if (sender is FrameworkElement { DataContext: OverlayWindow ow })
-            SetCascadeHover(ow.Hwnd, false, stackOutline: true);
-    }
-
+    /// <summary>Main-stack pin on the last sub (固定/取消固定整个堆叠);
+    /// Tag carries the head hwnd (DropLayer tools have no DataContext).</summary>
     private void OnCascadePinClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
+        if (sender is FrameworkElement { Tag: IntPtr h } && h != IntPtr.Zero)
         {
-            _controller.TogglePin(ow.Hwnd); // head identity = the stack card
+            _controller.TogglePin(h);
+            RebuildFromSlots(preserveScroll: true);
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>Main-stack ✕ = 解散堆叠 (drop the grouping, keep every
+    /// window — 取消主标签的固定则默认取消子标签的所有的固定).</summary>
+    private void OnCascadeDissolveClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: IntPtr h } && h != IntPtr.Zero)
+        {
+            _controller.DissolveStack(h);
+            RebuildFromSlots(preserveScroll: true);
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>Sub-card member pin (子标签固定): the controller auto-pins
+    /// the parent stack first (联动 — 主标签固定是子固定的前提).</summary>
+    private void OnCascadeMemberPinClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: IntPtr h } && h != IntPtr.Zero)
+        {
+            _controller.ToggleMemberPin(h);
             RebuildFromSlots(preserveScroll: true);
             e.Handled = true;
         }
@@ -1723,7 +1987,8 @@ public partial class SwitcherOverlay : Window
     private FrameworkElement? _captureElt;
 
     private bool CanDrag(OverlayWindow ow) =>
-        _controller.IsInStackView || (ow.SlotBadge != "0" && !ow.IsPinned);
+        !_controller.IsMemberPinned(ow.Hwnd)
+        && (_controller.IsInStackView || (ow.SlotBadge != "0" && !ow.IsPinned));
 
     /// <summary>Pin/close presses must not arm the card drag.</summary>
     private void OnToolDown(object sender, MouseButtonEventArgs e) => e.Handled = true;
@@ -1795,17 +2060,21 @@ public partial class SwitcherOverlay : Window
         {
             var ctl = c.headCard.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var relX = p.X - ctl.X;
+            bool movedC;
             if (!_dragFromFanStrip && relX < c.headCard.ActualWidth * 0.25)
             {
                 // Reorder band: place the dragged card before the cascade.
-                _controller.MoveRelative(dragHwnd, c.head.Hwnd, before: true);
+                movedC = _controller.MoveRelative(dragHwnd, c.head.Hwnd, before: true);
             }
             else if (CascadeRegion(c.st, c.head.ThumbWidth + 16, relX) is { } r
                 && c.st.Members[r.index].Hwnd != dragHwnd)
             {
-                _controller.StackDrop(dragHwnd, c.st.Members[r.index].Hwnd, r.before);
+                movedC = _controller.StackDrop(dragHwnd, c.st.Members[r.index].Hwnd, r.before);
             }
-            RebuildFromSlots(preserveScroll: true);
+            else movedC = false;
+            // A rejected move (固定锚定) changed nothing — don't rebuild,
+            // or the fresh containers would wipe the pin-flash feedback.
+            if (movedC) RebuildFromSlots(preserveScroll: true);
             return;
         }
         var inGrid = InCardGrid(p);
@@ -1815,25 +2084,26 @@ public partial class SwitcherOverlay : Window
             if (target.Hwnd == dragHwnd) return; // released on itself: no-op
             var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var rel = (p.X - pos.X) / Math.Max(card.ActualWidth, 1);
+            bool movedT;
             if (_controller.IsInStackView)
             {
                 // Sub view: every card is a member of the same stack, so any
                 // card drop reorders members (StackDropCore's same-stack
                 // branch) — left half lands before, right half after.
-                _controller.StackDrop(dragHwnd, target.Hwnd, before: rel < 0.5);
+                movedT = _controller.StackDrop(dragHwnd, target.Hwnd, before: rel < 0.5);
             }
             else
             {
                 // Zones: outer 25% bands = 排序 (before/after), middle
                 // = 集中 (drop onto the card → stack).
                 if (rel < 0.25)
-                    _controller.MoveRelative(dragHwnd, target.Hwnd, before: true);
+                    movedT = _controller.MoveRelative(dragHwnd, target.Hwnd, before: true);
                 else if (rel > 0.75)
-                    _controller.MoveRelative(dragHwnd, target.Hwnd, before: false);
+                    movedT = _controller.MoveRelative(dragHwnd, target.Hwnd, before: false);
                 else
-                    _controller.StackDrop(dragHwnd, target.Hwnd, before: false);
+                    movedT = _controller.StackDrop(dragHwnd, target.Hwnd, before: false);
             }
-            RebuildFromSlots(preserveScroll: true);
+            if (movedT) RebuildFromSlots(preserveScroll: true);
             return;
         }
         if (fromStrip || (_controller.IsInStackView && !inGrid))
@@ -1846,11 +2116,10 @@ public partial class SwitcherOverlay : Window
         }
         var drop = FindGapInsert(p);
         if (drop is not { } d) return;
-        if (_controller.IsInStackView)
-            _controller.StackDrop(dragHwnd, d.target, d.before); // member reorder
-        else
-            _controller.MoveRelative(dragHwnd, d.target, d.before);
-        RebuildFromSlots(preserveScroll: true);
+        var moved = _controller.IsInStackView
+            ? _controller.StackDrop(dragHwnd, d.target, d.before) // member reorder
+            : _controller.MoveRelative(dragHwnd, d.target, d.before);
+        if (moved) RebuildFromSlots(preserveScroll: true);
     }
 
     /// <summary>Nearest card on the cursor's row: dropping left of its
@@ -2058,9 +2327,11 @@ public partial class SwitcherOverlay : Window
         if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
         {
             WindowSwitcherWpf.Services.Log.Info("CardEvent", $"pinclick '{ow.Title}'");
-            // The controller recomputes slots (pin freezes the number) and
-            // persists to order.json; the overlay re-renders from it.
-            _controller.TogglePin(ow.Hwnd);
+            // Sub view (alt+数字进入): the card IS a member — pin it as
+            // such; main view pins the top-level slot. The controller
+            // recomputes and persists; the overlay re-renders from it.
+            if (_controller.IsInStackView) _controller.ToggleMemberPin(ow.Hwnd);
+            else _controller.TogglePin(ow.Hwnd);
             RebuildFromSlots(preserveScroll: true);
             e.Handled = true;
         }
@@ -2070,8 +2341,15 @@ public partial class SwitcherOverlay : Window
     {
         if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
         {
-            // Graceful close (same as the window's own ✕), not a kill.
-            CloseWindowGracefully(ow.Hwnd);
+            // Main view: ✕ on a stack head = 解散堆叠 (drop the grouping,
+            // keep every window — 主标签的❌删掉主标签里的所有子标签);
+            // any other card closes that window. Sub view: always close
+            // that member's window (never dissolve from inside).
+            if (!_controller.IsInStackView
+                && _controller.StackInfoFor(ow.Hwnd) is { Members.Count: >= 2 })
+                _controller.DissolveStack(ow.Hwnd);
+            else
+                CloseWindowGracefully(ow.Hwnd);
             e.Handled = true;
         }
     }
@@ -2134,7 +2412,7 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     // Pin glyph: blue when pinned, gray when not — driven by a brush so
     // the template only needs one TextBlock.
     public System.Windows.Media.Brush PinBrush =>
-        IsPinned ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x00, 0x78, 0xD4))
+        IsPinned ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xD9, 0x77, 0x06))
                  : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A));
 
     // ---- Group accent (色码层) ----

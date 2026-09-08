@@ -138,7 +138,14 @@
                                         </Trigger>
                                         <DataTrigger Binding="{Binding IsSelected}" Value="True">
                                             <Setter Property="BorderBrush" Value="#FF0078D4"/>
-                                            <Setter Property="BorderThickness" Value="3"/>
+                                            <Setter Property="BorderThickness" Value="4"/>
+                                        </DataTrigger>
+                                        <!-- 固定 = permanent pin-colored frame (last
+                                             trigger wins: pinned stays visible even
+                                             while selected, just thicker). -->
+                                        <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                            <Setter Property="BorderBrush" Value="#FFD97706"/>
+                                            <Setter Property="BorderThickness" Value="4"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
@@ -157,8 +164,7 @@
                                            Margin="14,3,14,0"
                                            RadiusX="1.5" RadiusY="1.5"
                                            Fill="{Binding GroupStripBrush}"/>
-                            <StackPanel MouseEnter="OnHeadHoverEnter"
-                                        MouseLeave="OnHeadHoverLeave">
+                            <StackPanel>
                                 <Grid Margin="8,7,8,7">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
                                         <!-- Slot number badge sits top-left, in
@@ -197,7 +203,8 @@
                                                VerticalAlignment="Center"
                                                Source="{Binding Icon}"
                                                RenderOptions.BitmapScalingMode="HighQuality"/>
-                                        <TextBlock Text="{Binding DisplayTitle}"
+                                        <TextBlock x:Name="TitleText"
+                                                   Text="{Binding DisplayTitle}"
                                                    Foreground="#202020"
                                                    FontSize="12"
                                                    FontWeight="SemiBold"
@@ -206,65 +213,56 @@
                                                    MaxWidth="230"
                                                    TextTrimming="CharacterEllipsis"/>
                                     </StackPanel>
-                                    <!-- Hover tools on the right: pin and
-                                         close (hover only, opacity keeps
-                                         layout stable so nothing shifts). -->
-                                    <StackPanel Orientation="Horizontal"
-                                                HorizontalAlignment="Right"
-                                                VerticalAlignment="Center">
-                                        <Border Background="Transparent"
-                                                CornerRadius="4"
-                                                Margin="2,0"
-                                                Width="20" Height="20"
-                                                MouseLeftButtonDown="OnToolDown"
-                                                MouseLeftButtonUp="OnPinClick"
-                                                ToolTip="固定此槽位">
-                                            <Border.Style>
-                                                <Style TargetType="Border">
-                                                    <Setter Property="Opacity" Value="0"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding ElementName=Card, Path=IsMouseOver}" Value="True">
-                                                            <Setter Property="Opacity" Value="1"/>
-                                                        </DataTrigger>
-                                                        <Trigger Property="IsMouseOver" Value="True">
-                                                            <Setter Property="Background" Value="#14000000"/>
-                                                        </Trigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Border.Style>
-                                            <TextBlock Text="📌"
-                                                       FontSize="10"
-                                                       Foreground="{Binding PinBrush}"
-                                                       HorizontalAlignment="Center"
-                                                       VerticalAlignment="Center"/>
-                                        </Border>
-                                        <Border Background="Transparent"
-                                                CornerRadius="4"
-                                                Margin="2,0"
-                                                Width="20" Height="20"
-                                                MouseLeftButtonDown="OnToolDown"
-                                                MouseLeftButtonUp="OnCloseClick"
-                                                ToolTip="关闭窗口">
-                                            <Border.Style>
-                                                <Style TargetType="Border">
-                                                    <Setter Property="Opacity" Value="0"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding ElementName=Card, Path=IsMouseOver}" Value="True">
-                                                            <Setter Property="Opacity" Value="1"/>
-                                                        </DataTrigger>
-                                                        <Trigger Property="IsMouseOver" Value="True">
-                                                            <Setter Property="Background" Value="#14E81123"/>
-                                                        </Trigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Border.Style>
-                                            <TextBlock Text="✕"
-                                                       FontSize="11"
-                                                       Foreground="#FF616161"
-                                                       HorizontalAlignment="Center"
-                                                       VerticalAlignment="Center"/>
-                                        </Border>
-                                    </StackPanel>
+                                    <!-- Hover tool zone on the right: an OPAQUE
+                                         white patch that covers the title's
+                                         tail (右上角变白色区域) with pin/close
+                                         inside. Opacity keeps its footprint
+                                         constant — the card's width/height NEVER
+                                         change on hover (样式不能再变). -->
+                                    <Border HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            CornerRadius="4">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="Transparent"/>
+                                                <Setter Property="Opacity" Value="0"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ElementName=Card, Path=IsMouseOver}" Value="True">
+                                                        <Setter Property="Background" Value="#FFFFFFFF"/>
+                                                        <Setter Property="Opacity" Value="1"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border Background="Transparent"
+                                                    CornerRadius="4"
+                                                    Margin="2,0"
+                                                    Width="20" Height="20"
+                                                    MouseLeftButtonDown="OnToolDown"
+                                                    MouseLeftButtonUp="OnPinClick"
+                                                    ToolTip="固定此槽位">
+                                                <TextBlock Text="📌"
+                                                           FontSize="10"
+                                                           Foreground="{Binding PinBrush}"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+                                            <Border Background="Transparent"
+                                                    CornerRadius="4"
+                                                    Margin="2,0"
+                                                    Width="20" Height="20"
+                                                    MouseLeftButtonDown="OnToolDown"
+                                                    MouseLeftButtonUp="OnCloseClick"
+                                                    ToolTip="关闭窗口">
+                                                <TextBlock Text="✕"
+                                                           FontSize="11"
+                                                           Foreground="#FF616161"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
                                 </Grid>
                                 <Border x:Name="ThumbBorder"
                                         CornerRadius="6"

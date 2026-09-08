@@ -51,10 +51,20 @@ public sealed class PinDefinition
     /// <summary>Stable identity, matches <see cref="WindowEntry.GroupKey"/>.</summary>
     public string GroupKey { get; set; } = string.Empty;
 
+    /// <summary>For a top-level pin, the window title. For a stack-member
+    /// pin, the HEAD window's title (the parent stack's identity).</summary>
     public string Title { get; set; } = string.Empty;
 
-    /// <summary>The frozen slot number, 1..10. Slot 0 (most recent) is special and never pinnable.</summary>
+    /// <summary>The frozen slot number, 1..10. Slot 0 (most recent) is special
+    /// and never pinnable. For a member pin: the member's frozen position
+    /// inside its stack (1-based).</summary>
     public int Slot { get; set; }
+
+    /// <summary>Non-null ⇒ this pin belongs to the stack member with this
+    /// title (its parent stack is identified by GroupKey+Title above).
+    /// Null ⇒ a top-level card pin. Old order.json files lack the field and
+    /// deserialize as null, which keeps them valid top-level pins.</summary>
+    public string? MemberTitle { get; set; }
 }
 
 /// <summary>One card in the overlay: the live window plus its computed

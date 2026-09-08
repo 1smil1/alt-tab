@@ -44,6 +44,12 @@ public sealed class SwitcherController
     public bool HasWindows => _flat.Count > 0;
     public event Action? StateChanged;
 
+    /// <summary>A drag/move was rejected because it would displace a
+    /// pinned slot (固定卡编号不可被挤走). Payload = hwnd of the pin that
+    /// blocked the move (top-level card / stack head / pinned member) so
+    /// the overlay can ding + flash its frame — the user sees WHY.</summary>
+    public event Action<IntPtr>? MoveRejectedByPin;
+
     // ---------- 手动堆叠 (自定义集中/剥离) ----------
     // A stack is an ordered set of windows collapsed into ONE slot on the
     // main page: the head (Members[0]) carries the slot number and lends
@@ -167,6 +173,12 @@ public sealed class SwitcherController
 
         Slotted = AssignSlots(mru, _order.Pins, _activeSortRules);
         _flat = Slotted.Select(s => s.Entry).ToList();
+        // Diagnostics: duplicate hwnds in the flat list break the cascade
+        // build (two head cards share one stack → orphaned sub cards).
+        var dupGroups = _flat.GroupBy(w => w.Hwnd).Where(g => g.Count() > 1).ToList();
+        foreach (var g in dupGroups)
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"duplicate hwnd in flat: 0x{g.Key.ToInt64():X} x{g.Count()} '{g.First().Title}'");
         foreach (var sw in Slotted)
         {
             if (_stacksByHead.TryGetValue(sw.Entry.Hwnd, out var info))
@@ -282,6 +294,11 @@ public sealed class SwitcherController
         var pinnedKeys = new HashSet<(string, string)>();
         foreach (var pin in pins)
         {
+            // Stack-member pins (MemberTitle != null) freeze a member's
+            // position INSIDE its stack — they must not also claim a
+            // top-level slot, or the head window gets matched twice and
+            // shows up as two cards (one empty) in the flat list.
+            if (pin.MemberTitle is not null) continue;
             if (pin.Slot < 1 || pin.Slot > 10 || slotMap.ContainsKey(pin.Slot)) continue;
             var match = rest.Find(w => w.GroupKey == pin.GroupKey && w.Title == pin.Title);
             if (match is null) continue; // dormant pin, window not alive
@@ -344,28 +361,183 @@ public sealed class SwitcherController
         var sw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd);
         if (sw is null || sw.Slot == 0) return;
         var pin = _order.Pins.FirstOrDefault(p =>
-            p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title);
+            p.MemberTitle is null
+            && p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title);
         if (pin is not null)
         {
+            // Unpinning a stack head also releases its member pins — the
+            // members' guarantee (主标签固定) dies with the stack pin.
+            _order.Pins.RemoveAll(p => p.MemberTitle is not null
+                && p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title);
             _order.Pins.Remove(pin);
             WindowSwitcherWpf.Services.Log.Info("Controller",
                 $"unpin slot={pin.Slot} '{sw.Entry.Title}'");
         }
         else
         {
-            var slot = sw.Slot is >= 1 and <= 10
-                ? sw.Slot
-                : Enumerable.Range(1, 10)
-                    .FirstOrDefault(s => Slotted.All(x => x.Slot != s), -1);
-            if (slot < 1) return; // no free slot to pin into
-            _order.Pins.Add(new PinDefinition(sw.Entry.GroupKey, sw.Entry.Title, slot));
+            if (!PinHeadCore(sw)) return; // no free slot to pin into
             WindowSwitcherWpf.Services.Log.Info("Controller",
-                $"pin slot={slot} '{sw.Entry.Title}'");
+                $"pin slot={sw.Slot} '{sw.Entry.Title}'");
         }
         _store.SaveDebounced(_order);
         RebuildFlat(_lastForeground);
         KeepSelection();
         StateChanged?.Invoke();
+    }
+
+    /// <summary>Pin-side of TogglePin: freeze this card's current number
+    /// (lowest free one when unmanaged). Caller persists + reflows.</summary>
+    private bool PinHeadCore(SlotWindow sw)
+    {
+        var slot = sw.Slot is >= 1 and <= 10
+            ? sw.Slot
+            : Enumerable.Range(1, 10)
+                .FirstOrDefault(s => Slotted.All(x => x.Slot != s), -1);
+        if (slot < 1) return false;
+        _order.Pins.Add(new PinDefinition(sw.Entry.GroupKey, sw.Entry.Title, slot));
+        return true;
+    }
+
+    public bool IsStackPinned(IntPtr headHwnd) =>
+        Slotted.FirstOrDefault(s => s.Entry.Hwnd == headHwnd) is { IsPinned: true };
+
+    // ---------- Stack-member pins (子标签固定; 固定成员联动主标签) ----------
+    // Constraint from the spec: 主标签只有固定了，子标签才能固定; pinning
+    // any member pins the whole stack first (联动). Identity = the head's
+    // (GroupKey, Title) + the member's title; the frozen in-stack position
+    // rides in Slot (1-based).
+
+    private WindowStackInfo? StackOfMember(IntPtr hwnd) =>
+        _stacksByHead.Values.FirstOrDefault(s => s.Members.Any(m => m.Hwnd == hwnd));
+
+    /// <summary>True when this window is a pinned member of a stack.</summary>
+    public bool IsMemberPinned(IntPtr memberHwnd)
+    {
+        if (StackOfMember(memberHwnd) is not { } st) return false;
+        var member = st.Members.FirstOrDefault(m => m.Hwnd == memberHwnd);
+        if (member is null) return false;
+        var head = st.Head;
+        return _order.Pins.Any(p => p.MemberTitle == member.Title
+            && p.GroupKey == head.GroupKey && p.Title == head.Title);
+    }
+
+    /// <summary>Pin/unpin a stack member (子标签固定). Pinning auto-pins the
+    /// parent stack first (联动); unpinning leaves the stack pin alone
+    /// (解除子固定不动主固定). Frozen position = current member index.</summary>
+    public bool ToggleMemberPin(IntPtr memberHwnd)
+    {
+        if (StackOfMember(memberHwnd) is not { } st) return false;
+        var head = st.Head;
+        var member = st.Members.FirstOrDefault(m => m.Hwnd == memberHwnd);
+        if (member is null) return false;
+        var pin = _order.Pins.FirstOrDefault(p => p.MemberTitle is not null
+            && p.MemberTitle == member.Title
+            && p.GroupKey == head.GroupKey && p.Title == head.Title);
+        if (pin is not null)
+        {
+            _order.Pins.Remove(pin);
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"unpin member '{member.Title}' of '{head.Title}'");
+        }
+        else
+        {
+            // 联动: a member pin requires the stack pin — create it first.
+            var headSw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == head.Hwnd);
+            if (headSw is null) return false;
+            if (!headSw.IsPinned && !PinHeadCore(headSw)) return false;
+            var slot = st.Members.IndexOf(member) + 1; // 1-based frozen position
+            _order.Pins.Add(new PinDefinition(head.GroupKey, head.Title, slot)
+            {
+                MemberTitle = member.Title,
+            });
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"pin member '{member.Title}' pos={slot} of '{head.Title}'");
+        }
+        _store.SaveDebounced(_order);
+        RebuildFlat(_lastForeground);
+        KeepSelection();
+        StateChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>Member-pin anchor guard (子标签同理): simulate a same-stack
+    /// move (moveDi set) or a pure insert of one flowing member (moveDi
+    /// null) and verify every pinned member still anchors its frozen
+    /// position — no flowing member numbered ≥ the pin may sit on its left
+    /// after the monotonic fill.</summary>
+    public bool MemberPinAllowsInsert(StackDefinition def, int? moveDi, int at)
+    {
+        var members = def.Members.ToList();
+        if (moveDi is { } di)
+        {
+            if (di == at || di == at - 1) return true; // no-op move
+            var m = members[di];
+            members.RemoveAt(di);
+            members.Insert(at > di ? at - 1 : at, m);
+        }
+        else
+        {
+            members.Insert(Math.Clamp(at, 0, members.Count),
+                new StackMemberDef { GroupKey = "?", Title = "?" }); // synthetic flowing member
+        }
+        var head = def.Members[0];
+        var pins = _order.Pins.Where(p => p.MemberTitle is not null
+            && p.GroupKey == head.GroupKey && p.Title == head.Title).ToList();
+        if (pins.Count == 0) return true;
+        var numbers = MemberMonotonicNumbers(members, pins);
+        for (var i = 0; i < members.Count; i++)
+        {
+            var pin = pins.FirstOrDefault(p => p.MemberTitle == members[i].Title);
+            if (pin is null) continue; // pinned members keep their own number
+            for (var j = 0; j < i; j++)
+                if (numbers[j] >= pin.Slot
+                    && pins.All(p => p.MemberTitle != members[j].Title))
+                    return false; // flowing member squeezed ahead of the pin
+        }
+        return true;
+    }
+
+    /// <summary>Monotonic in-stack numbering: pinned members keep their
+    /// frozen slot, flowing members take the next free number, gaps stay
+    /// vacant (-1 = overflow). Mirrors <see cref="RenumberFlow"/> scoped to
+    /// stack members.</summary>
+    public static List<int> MemberMonotonicNumbers(List<StackMemberDef> ordered,
+        List<PinDefinition> pins)
+    {
+        var pinSlots = pins.Select(p => p.Slot).Where(s => s is >= 1 and <= 10).ToHashSet();
+        var result = new List<int>(ordered.Count);
+        var next = 1;
+        foreach (var m in ordered)
+        {
+            var pin = pins.FirstOrDefault(p => p.MemberTitle == m.Title);
+            if (pin is not null && pin.Slot is >= 1 and <= 10)
+            {
+                result.Add(pin.Slot);
+                next = Math.Max(next, pin.Slot + 1);
+            }
+            else
+            {
+                while (next <= 10 && pinSlots.Contains(next)) next++;
+                result.Add(next <= 10 ? next++ : -1);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>解散堆叠: remove the whole stack definition — every member
+    /// becomes a lone card again (the head's ✕ on a stacked card). Windows
+    /// are NOT closed.</summary>
+    public bool DissolveStack(IntPtr headHwnd)
+    {
+        var entry = EntryByHwnd(headHwnd);
+        if (entry is null) return false;
+        var def = FindDef(_config.Stacks, entry);
+        if (def is null) return false;
+        _config.Stacks.Remove(def);
+        SaveStacksAndReflow();
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"stack dissolved head='{entry.Title}' members={def.Members.Count}");
+        return true;
     }
 
     /// <summary>Drag reorder: insert a (draggable) window before or after a
@@ -386,6 +558,14 @@ public sealed class SwitcherController
         list.Insert(before ? ti : ti + 1, moving);
 
         var renumbered = RenumberFlow(list);
+        if (!PinsAnchored(renumbered))
+        {
+            var violator = AnchorViolatorHwnd(renumbered);
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"move rejected by pin hwnd=0x{violator.ToInt64():X} (move 0x{movingHwnd.ToInt64():X} rel 0x{targetHwnd.ToInt64():X})");
+            MoveRejectedByPin?.Invoke(violator);
+            return false; // 固定卡编号不可被挤走
+        }
         Slotted = renumbered;
         _flat = renumbered.Select(s => s.Entry).ToList();
         KeepSelection();
@@ -393,26 +573,86 @@ public sealed class SwitcherController
         return true;
     }
 
-    /// <summary>Pure renumber pass over an ordered card list: slot 0 and
-    /// pins keep their numbers, every other window flows into the lowest
-    /// free number 1..10, extras go to the tail as unmanaged (-1).</summary>
+    /// <summary>Pure renumber pass over an ordered card list (单调编号):
+    /// slot 0 and pins keep their numbers; every other window takes the
+    /// smallest free number ≥ (previous+1), skipping pin-claimed slots —
+    /// badges stay strictly increasing along the row, and numbers left
+    /// behind (e.g. a card dragged past a pin: 2 → 4, 4 → 5) stay VACANT
+    /// instead of backfilling. Deleting a card before a pin shifts the pin
+    /// left while its frozen number holds (3号不因前移变2).</summary>
     public static List<SlotWindow> RenumberFlow(List<SlotWindow> ordered)
     {
-        var claimed = new Dictionary<int, WindowEntry>();
+        var pinSlots = new HashSet<int>();
         foreach (var s in ordered)
-            if (s.IsPinned && s.Slot is >= 1 and <= 10 && !claimed.ContainsKey(s.Slot))
-                claimed[s.Slot] = s.Entry;
-        var free = new Queue<int>(Enumerable.Range(1, 10).Where(s => !claimed.ContainsKey(s)));
+            if (s.IsPinned && s.Slot is >= 1 and <= 10)
+                pinSlots.Add(s.Slot);
         var result = new List<SlotWindow>(ordered.Count);
         var overflow = new List<SlotWindow>();
+        var next = 1;
         foreach (var s in ordered)
         {
-            if (s.Slot == 0 || s.IsPinned) { result.Add(s); continue; }
-            if (free.Count > 0) result.Add(s with { Slot = free.Dequeue() });
+            if (s.Slot == 0 || s.IsPinned)
+            {
+                result.Add(s);
+                if (s.IsPinned && s.Slot is >= 1 and <= 10)
+                    next = Math.Max(next, s.Slot + 1); // never re-issue behind a pin
+                continue;
+            }
+            while (next <= 10 && pinSlots.Contains(next)) next++;
+            if (next <= 10) result.Add(s with { Slot = next++ });
             else overflow.Add(s);
         }
         foreach (var s in overflow) result.Add(s with { Slot = -1 });
         return result;
+    }
+
+    /// <summary>Pin anchor rule (固定=相对位置不变): every number below a
+    /// pinned card's frozen slot must sit to its LEFT. A drop that lands a
+    /// flowing card numbered ≥ the pin's ahead of it would force the pin to
+    /// renumber (3号变4号) — that move is rejected by MoveRelative.</summary>
+    public static bool PinsAnchored(List<SlotWindow> ordered)
+    {
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var pin = ordered[i];
+            if (!pin.IsPinned || pin.Slot is < 1 or > 10) continue;
+            for (var j = 0; j < i; j++)
+            {
+                var left = ordered[j];
+                if (left.Slot == 0 || left.IsPinned) continue; // slot 0 = number 0, always leftmost
+                if (left.Slot >= pin.Slot) return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>First pinned card whose anchor rule <paramref name="ordered"/>
+    /// violates — companion to <see cref="PinsAnchored"/>, used to point the
+    /// rejection feedback at the exact pin that blocked the move.</summary>
+    public static IntPtr AnchorViolatorHwnd(List<SlotWindow> ordered)
+    {
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var pin = ordered[i];
+            if (!pin.IsPinned || pin.Slot is < 1 or > 10) continue;
+            for (var j = 0; j < i; j++)
+            {
+                var left = ordered[j];
+                if (left.Slot == 0 || left.IsPinned) continue;
+                if (left.Slot >= pin.Slot) return pin.Entry.Hwnd;
+            }
+        }
+        return IntPtr.Zero;
+    }
+
+    /// <summary>Hwnd of a stack definition's head entry (for feedback that
+    /// targets a whole pinned stack), Zero if not currently alive.</summary>
+    private IntPtr StackHeadHwnd(StackDefinition def)
+    {
+        var head = def.Members.FirstOrDefault();
+        if (head is null) return IntPtr.Zero;
+        var e = _flat.Find(w => w.GroupKey == head.GroupKey && w.Title == head.Title);
+        return e?.Hwnd ?? IntPtr.Zero;
     }
 
     /// <summary>Re-points ActiveFlatIndex at the previously selected hwnd
@@ -531,6 +771,36 @@ public sealed class SwitcherController
         var drag = EntryByHwnd(dragHwnd);
         var target = EntryByHwnd(targetHwnd);
         if (drag is null || target is null) return false;
+        var dragDef = FindDef(_config.Stacks, drag);
+        var targetDef = FindDef(_config.Stacks, target);
+        // 固定成员不可被拖动 (member pins are immovable).
+        if (dragDef is not null && IsMemberPinned(dragHwnd))
+        {
+            MoveRejectedByPin?.Invoke(dragHwnd);
+            return false;
+        }
+        if (dragDef is not null && ReferenceEquals(dragDef, targetDef))
+        {
+            // Same-stack reorder: member-pin anchor guard (子标签同理).
+            var di = dragDef.Members.FindIndex(m => SameId(m, drag));
+            var ti = dragDef.Members.FindIndex(m => SameId(m, target));
+            if (!MemberPinAllowsInsert(dragDef, di, ti + (before ? 0 : 1)))
+            {
+                MoveRejectedByPin?.Invoke(StackHeadHwnd(dragDef));
+                return false;
+            }
+        }
+        else if (targetDef is not null)
+        {
+            // Cross-stack insert: the payload lands at a member boundary —
+            // guard the pinned members' frozen positions around it.
+            var ti = targetDef.Members.FindIndex(m => SameId(m, target));
+            if (!MemberPinAllowsInsert(targetDef, null, ti + (before ? 0 : 1)))
+            {
+                MoveRejectedByPin?.Invoke(StackHeadHwnd(targetDef));
+                return false;
+            }
+        }
         if (!StackDropCore(_config.Stacks, drag, target, before)) return false;
         SaveStacksAndReflow();
         WindowSwitcherWpf.Services.Log.Info("Controller",

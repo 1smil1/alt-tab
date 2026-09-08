@@ -301,6 +301,111 @@ public partial class App : Application
             s8.Count == 14 && s8[10].Slot == 10 && s8[11].Slot == -1 && s8[13].Slot == -1,
             string.Join(',', s8.Select(x => x.Slot)));
 
+        // 9. RenumberFlow — 把2拖到3的右边: row 1,[3!],[2],[4] must
+        //    renumber 2→4, 4→5 and leave slot 2 VACANT (badges strictly
+        //    increase along the row; no backfill behind the pin).
+        var s9 = SwitcherController.RenumberFlow(new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("c"), 3, true),
+            new(W("b"), 2, false),
+            new(W("d"), 4, false),
+        });
+        Check("drag-right-preserves-gap",
+            s9.Select(x => x.Slot).SequenceEqual(new[] { 0, 3, 4, 5 }) &&
+            s9.First(x => x.Entry.Title == "c").IsPinned,
+            string.Join(',', s9.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
+
+        // 10. PinsAnchored — a flowing card numbered ≥ a pin's slot may not
+        //     sit to its LEFT (4号不能拖到3号前); below the pin is fine.
+        var left = new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("d"), 4, false),
+            new(W("c"), 3, true),
+        };
+        var ok = new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("d"), 2, false),
+            new(W("c"), 3, true),
+        };
+        Check("pin-anchor-reject",
+            !SwitcherController.PinsAnchored(left) && SwitcherController.PinsAnchored(ok),
+            "4-left-of-pin3 must be rejected, 2-left-of-pin3 allowed");
+
+        // 11. RenumberFlow — 删除2: the row shifts left, the pin keeps 3
+        //     (编号不会从3变成2), and the number-2 gap stays vacant.
+        var s11 = SwitcherController.RenumberFlow(new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("c"), 3, true),
+        });
+        var c11 = s11.First(x => x.Entry.Title == "c");
+        Check("delete-shifts-pin-keeps-number",
+            c11.Slot == 3 && c11.IsPinned,
+            string.Join(',', s11.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
+
+        // 12. MemberMonotonicNumbers — in-stack numbering mirrors the card
+        //     model: pinned members hold their frozen slot, flow members
+        //     fill around them monotonically, overflow → -1.
+        static StackMemberDef M(string t) => new() { Title = t };
+        var memPins = new List<PinDefinition>
+        {
+            new("group:head", "head", 2) { MemberTitle = "m2" },
+        };
+        var n12 = SwitcherController.MemberMonotonicNumbers(
+            new List<StackMemberDef> { M("m1"), M("m2"), M("m3") }, memPins);
+        var n12b = SwitcherController.MemberMonotonicNumbers(
+            new List<StackMemberDef> { M("m2"), M("m1"), M("m3") },
+            new List<PinDefinition> { new("group:head", "head", 1) { MemberTitle = "m2" } });
+        var n12c = SwitcherController.MemberMonotonicNumbers(
+            Enumerable.Range(0, 11).Select(i => M($"w{i}")).ToList(),
+            new List<PinDefinition>());
+        Check("member-monotonic",
+            n12.SequenceEqual(new[] { 1, 2, 3 }) &&
+            n12b.SequenceEqual(new[] { 1, 2, 3 }) &&
+            n12c[^1] == -1 && n12c[9] == 10,
+            $"pins-hold:[{string.Join(',', n12)}] pin-first:[{string.Join(',', n12b)}] overflow-tail:{n12c[^1]}");
+
+        // 13. 通用性 — the model is NOT tied to the examples' slot 3: a
+        //     whole pinned BLOCK (3,4,5) and sparse pins (5,6) behave
+        //     identically (the fill loops over whatever pins exist).
+        var s13 = SwitcherController.RenumberFlow(new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("c3"), 3, true),
+            new(W("c4"), 4, true),
+            new(W("c5"), 5, true),
+            new(W("b"), 2, false),
+            new(W("d"), 6, false),
+        });
+        Check("multi-pin-block",
+            s13.Select(x => x.Slot).SequenceEqual(new[] { 0, 3, 4, 5, 6, 7 }),
+            string.Join(',', s13.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
+
+        var s13b = SwitcherController.RenumberFlow(new List<SlotWindow>
+        {
+            new(W("p5"), 5, true),
+            new(W("p6"), 6, true),
+            new(W("x"), 7, false),
+        });
+        Check("sparse-pins-5-6",
+            s13b.Select(x => x.Slot).SequenceEqual(new[] { 5, 6, 7 }) &&
+            !SwitcherController.PinsAnchored(new List<SlotWindow>
+            {
+                new(W("d"), 6, false),
+                new(W("p5"), 5, true),
+                new(W("p6"), 6, true),
+            }) &&
+            SwitcherController.PinsAnchored(new List<SlotWindow>
+            {
+                new(W("d"), 4, false),
+                new(W("p5"), 5, true),
+                new(W("p6"), 6, true),
+            }),
+            "pins 5,6: x keeps 7; 6-left-of-5 rejected; 4-left-of-5 allowed");
+
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
     }
