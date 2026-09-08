@@ -1785,6 +1785,29 @@ public partial class SwitcherOverlay : Window
             DropFanCardAt(p, dragHwnd);
             return;
         }
+        // Plain-card drags over a cascade span also resolve member-precise
+        // (一步到位): the drop inserts at the member boundary under the
+        // pointer. The head card's left 25% stays the reorder band (move
+        // the dragged card before the whole cascade); dropping a head on
+        // its own stack is a no-op via the same-member guard. Sub view has
+        // no cascades — skip there.
+        if (!_controller.IsInStackView && CascadeAt(p) is { } c)
+        {
+            var ctl = c.headCard.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            var relX = p.X - ctl.X;
+            if (!_dragFromFanStrip && relX < c.headCard.ActualWidth * 0.25)
+            {
+                // Reorder band: place the dragged card before the cascade.
+                _controller.MoveRelative(dragHwnd, c.head.Hwnd, before: true);
+            }
+            else if (CascadeRegion(c.st, c.head.ThumbWidth + 16, relX) is { } r
+                && c.st.Members[r.index].Hwnd != dragHwnd)
+            {
+                _controller.StackDrop(dragHwnd, c.st.Members[r.index].Hwnd, r.before);
+            }
+            RebuildFromSlots(preserveScroll: true);
+            return;
+        }
         var inGrid = InCardGrid(p);
         var card = CardAt(p);
         if (card is not null && card.DataContext is OverlayWindow target)
@@ -1884,13 +1907,14 @@ public partial class SwitcherOverlay : Window
         if (!_dragActive) return;
         if (e.LeftButton != MouseButtonState.Pressed) { EndDrag(); return; }
         var p = e.GetPosition(WindowsList);
-        if (_dragFromFanStrip && !_controller.IsInStackView
-            && CascadeAt(p) is { } c)
+        if (!_controller.IsInStackView && CascadeAt(p) is { } c)
         {
-            // Member in hand over a cascade's folded span: preview the
-            // exact member boundary the drop will insert at. The span
-            // reaches (n-1)·peek past the head card where CardAt finds
-            // nothing, so this must resolve before the CardAt lookup.
+            // Drag in hand over a cascade's folded span: preview the exact
+            // member boundary the drop will insert at. The span reaches
+            // (n-1)·peek past the head card where CardAt finds nothing, so
+            // this must resolve before the CardAt lookup. Plain-card drags
+            // keep the head's left 25% as a reorder band (line at the
+            // stack's left edge = move before the whole cascade).
             var tl = c.headCard.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var cardW = c.head.ThumbWidth + 16;
             if (CascadeRegion(c.st, cardW, p.X - tl.X) is { } r)
@@ -1898,8 +1922,10 @@ public partial class SwitcherOverlay : Window
                 var peek = cardW / 2;
                 var regionW = r.index == c.st.Members.Count - 1 ? cardW : peek;
                 HideStackGlow();
-                ShowLine(tl.X + r.index * peek + (r.before ? 0 : regionW),
-                         tl.Y, c.headCard.ActualHeight);
+                ShowLine(!_dragFromFanStrip && p.X - tl.X < c.headCard.ActualWidth * 0.25
+                    ? tl.X
+                    : tl.X + r.index * peek + (r.before ? 0 : regionW),
+                    tl.Y, c.headCard.ActualHeight);
                 return;
             }
         }
