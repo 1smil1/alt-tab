@@ -39,10 +39,12 @@ public partial class SwitcherOverlay : Window
         MaxHeight = SystemParameters.WorkArea.Height * 0.92;
 
         // Any movement of the window or its viewport changes the
-        // client-coordinate destination rects of the DWM thumbnails.
-        LocationChanged += (_, _) => UpdateLiveRects();
-        SizeChanged += (_, _) => UpdateLiveRects();
-        Scroller.ScrollChanged += (_, _) => UpdateLiveRects();
+        // client-coordinate destination rects of the DWM thumbnails AND
+        // the cascade sub-card positions (they live in DropLayer, a
+        // sibling canvas — re-layout after every viewport change).
+        LocationChanged += (_, _) => { UpdateLiveRects(); LayoutCascades(); };
+        SizeChanged += (_, _) => { UpdateLiveRects(); LayoutCascades(); };
+        Scroller.ScrollChanged += (_, _) => { UpdateLiveRects(); LayoutCascades(); };
 
         _thumbTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -960,7 +962,7 @@ public partial class SwitcherOverlay : Window
             done.Add(m.Hwnd);
             if (!_liveThumbs.TryGetValue(m.Hwnd, out var id)) continue;
             var el = i == 0 ? headEl
-                : _cascadeThumbs.TryGetValue(m.Hwnd, out var t) ? t : null;
+                : _cascadeSubs.TryGetValue(m.Hwnd, out var t) ? t : null;
             if (el is null || !el.IsLoaded) continue;
             var tl = el.PointToScreen(new Point(0, 0));
             var br = el.PointToScreen(new Point(el.ActualWidth, el.ActualHeight));
@@ -1011,51 +1013,71 @@ public partial class SwitcherOverlay : Window
     // The declarative template renders the HEAD card; members 1..n-1 are
     // injected as overlapping sub-cards offset by half a card each (later
     // children draw on top, so the last member is the fully visible face).
-    private readonly Dictionary<IntPtr, Border> _cascadeThumbs = new();
+    private readonly Dictionary<IntPtr, Border> _cascadeSubs = new();
 
     private void BuildCascades()
     {
-        _cascadeThumbs.Clear();
-        WindowSwitcherWpf.Services.Log.Info("Cascade",
-            $"build open={_isOpen} stackView={_controller.IsInStackView} windows={_windows.Count}");
+        // Detach any old cascade subs from their previous parent so the
+        // new run can re-parent them into DropLayer cleanly.
+        foreach (var old in _cascadeSubs.Values)
+            if (old.Parent is Panel p) p.Children.Remove(old);
+        _cascadeSubs.Clear();
         if (!_isOpen || _controller.IsInStackView) return;
         foreach (var ow in _windows)
         {
             if (_controller.StackInfoFor(ow.Hwnd) is not { } st
                 || st.Members.Count < 2) continue;
             if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
-                is not ContentPresenter cp)
-            {
-                WindowSwitcherWpf.Services.Log.Info("Cascade", "no container");
-                continue;
-            }
-            if (WindowsList.ItemTemplate?.FindName("CardRoot", cp) is not Grid root)
-            {
-                WindowSwitcherWpf.Services.Log.Info("Cascade", "no CardRoot");
-                continue;
-            }
-            for (var i = root.Children.Count - 1; i >= 0; i--)
-                if (root.Children[i] is Border b && b.Tag is IntPtr)
-                    root.Children.RemoveAt(i);
+                is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("CardRoot", cp) is not Grid root) continue;
+            // No more injecting subs into the head's CardRoot — the head
+            // stays at its natural width (ThumbWidth + 16) and the subs
+            // live in DropLayer (positioned by LayoutCascades).
             var cardW = ow.ThumbWidth + 16;
             var peek = cardW / 2;
             var accent = _accentMap.TryGetValue(ow.GroupKey, out var c)
                 ? c : System.Windows.Media.Color.FromRgb(0x9A, 0x9A, 0x9A);
-            var added = 0;
             for (var i = 1; i < st.Members.Count; i++)
             {
                 var m = st.Members[i];
                 var sub = BuildCascadeCard(m, ow.ThumbWidth, cardW,
                     i * peek, accent, i == st.Members.Count - 1);
-                root.Children.Add(sub);
-                added++;
+                DropLayer.Children.Add(sub);
             }
-            WindowSwitcherWpf.Services.Log.Info("Cascade",
-                $"head='{ow.DisplayTitle}' cardW={cardW:F0} added={added}");
         }
-        // Freshly added sub-cards have no layout yet at Loaded priority —
-        // re-measure the rects once the pass at Render priority has run.
-        Dispatcher.BeginInvoke(new Action(UpdateLiveRects), DispatcherPriority.Render);
+        // Position the cascade subs in DropLayer coords once the head card
+        // has its real screen rect (Render priority, same as the live
+        // thumbnail rects).
+        Dispatcher.BeginInvoke(new Action(LayoutCascades), DispatcherPriority.Render);
+    }
+
+    /// <summary>Position every cascade sub in DropLayer coords using the
+    /// head card's actual screen position. Subs are absolute-positioned
+    /// children of DropLayer (a Canvas), so they can extend past the head
+    /// card's natural width without disturbing the head's own template
+    /// layout. Re-runs on every SizeChanged/Layout pass via the
+    /// LocationChanged/SizeChanged hooks in the constructor.</summary>
+    private void LayoutCascades()
+    {
+        foreach (var ow in _windows)
+        {
+            if (_controller.StackInfoFor(ow.Hwnd) is not { } st
+                || st.Members.Count < 2) continue;
+            if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
+                is not ContentPresenter cp) continue;
+            if (WindowsList.ItemTemplate?.FindName("Card", cp) is not Border headCard) continue;
+            if (headCard.ActualWidth <= 0) continue;
+            var cardW = ow.ThumbWidth + 16;
+            var peek = cardW / 2;
+            var headTl = headCard.TransformToVisual(DropLayer)
+                .Transform(new Point(0, 0));
+            for (var i = 1; i < st.Members.Count; i++)
+            {
+                if (!_cascadeSubs.TryGetValue(st.Members[i].Hwnd, out var sub)) continue;
+                Canvas.SetLeft(sub, headTl.X + i * peek);
+                Canvas.SetTop(sub, headTl.Y);
+            }
+        }
     }
 
     /// <summary>One overlapped member card: title strip + half-visible
@@ -1064,7 +1086,28 @@ public partial class SwitcherOverlay : Window
     private Border BuildCascadeCard(WindowEntry m, double thumbW, double cardW,
         double offsetX, System.Windows.Media.Color accent, bool last)
     {
-        var strip = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(8, 7, 8, 7) };
+        // Sub card lives in DropLayer, positioned absolutely by
+        // LayoutCascades using Canvas.SetLeft/Top. A Canvas does NOT
+        // stretch its children, so the sub needs an explicit Height to
+        // match the head card's title+thumb area; otherwise it renders as
+        // a 0-height sliver and is invisible.
+        //   title strip ≈ 32px (icon row) + 150 thumb + ~14 margins ≈ 196.
+        var peek = cardW / 2;
+        // The last sub renders the full cardW so the title can span the
+        // whole row — but the strip also carries two 20px tool buttons
+        // (pin/close) plus the 20px icon and the 7px margins on either
+        // side of the text. Reserve 90px for tools so the text never
+        // gets pushed under them.
+        var titleRoom = last ? Math.Max(cardW - 90, 60) : Math.Max(peek - 20, 30);
+        var thumbRoom = last ? Math.Max(thumbW, peek + 20) : Math.Max(peek, 60);
+        const double subHeight = 200; // title strip (32) + thumb (150) + bottom margin (14) + breathing room
+        var strip = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(8, 7, 8, 7),
+        };
         var icon = new Image
         {
             Width = 20, Height = 20, VerticalAlignment = VerticalAlignment.Center,
@@ -1079,20 +1122,20 @@ public partial class SwitcherOverlay : Window
             Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x20, 0x20, 0x20)),
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(7, 0, 0, 0),
-            MaxWidth = Math.Max(cardW - (last ? 130 : 60), 30),
+            MaxWidth = titleRoom,
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
         if (last)
         {
-            // Tools live on the fully visible card (the head's own tools
-            // are covered by the cascade). Pin acts on the stack identity.
             strip.Children.Add(MakeCascadeTool(m.Hwnd, "📌", "固定此堆叠", OnCascadePinClick));
             strip.Children.Add(MakeCascadeTool(m.Hwnd, "✕", "关闭此窗口", OnCascadeCloseClick));
         }
         var thumb = new Border
         {
             Height = 150,
-            Width = thumbW,
+            Width = thumbRoom,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(7, 0, 7, 7),
             CornerRadius = new CornerRadius(6),
             Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xEF, 0xEF, 0xEF)),
@@ -1108,31 +1151,48 @@ public partial class SwitcherOverlay : Window
             Source = LookupCache(m.Hwnd)?.Icon,
         };
         thumb.Child = new Grid { Children = { ph } };
-        _cascadeThumbs[m.Hwnd] = thumb;
-
-        var panel = new StackPanel();
+        var panel = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+        };
         panel.Children.Add(strip);
         panel.Children.Add(thumb);
         var sub = new Border
         {
             Width = cardW,
+            Height = subHeight,
             HorizontalAlignment = HorizontalAlignment.Left,
-            Margin = new Thickness(offsetX, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Top,
             CornerRadius = new CornerRadius(8),
             Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF)),
-            BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0x1A, 0, 0, 0)),
+            BorderBrush = DefaultSubBorderBrush,
             BorderThickness = new Thickness(1),
+            ClipToBounds = !last,
             Cursor = System.Windows.Input.Cursors.Hand,
-            Tag = m.Hwnd, // member identity for drag/hover handlers
+            Tag = m.Hwnd,
             ToolTip = m.Title,
             Child = panel,
         };
+        _cascadeSubs[m.Hwnd] = sub;
         sub.MouseLeftButtonDown += OnCascadeDown;
-        sub.MouseMove += OnCardMouseMove;
+        // Subs live in DropLayer (sibling of RootBorder), so they steal
+        // MouseMove from the RootBorder. OnCascadeSubMove forwards to the
+        // hover tracker and the drag handler.
+        sub.MouseMove += OnCascadeSubMove;
         sub.MouseLeftButtonUp += OnCascadeUp;
-        sub.MouseEnter += OnCascadeMouseEnter;
-        sub.MouseLeave += OnCascadeMouseLeave;
         return sub;
+    }
+
+    /// <summary>Sub hover tracking — subs are in DropLayer, so they
+    /// intercept MouseMove from RootBorder. Re-resolve the active sub
+    /// from the cursor position so the previous highlight is cleared
+    /// even when the pointer jumps between overlapping subs.</summary>
+    private void OnCascadeSubMove(object sender, MouseEventArgs e)
+    {
+        UpdateCascadeHoverFromPointer(e.GetPosition(WindowsList));
+        // Forward to the drag handler so the drag system still sees motion.
+        OnCardMouseMove(sender, e);
     }
 
     private static Border MakeCascadeTool(IntPtr hwnd, string glyph, string tip,
@@ -1254,69 +1314,224 @@ public partial class SwitcherOverlay : Window
 
     // ---------- Cascade hover (悬停哪个成员 = 选中哪个) ----------
     // The cascade shows only half of each covered member, so the pointer
-    // position decides the target: the hovered member's preview border
+    // position decides the target: the hovered member's full card border
     // turns blue, and a plain click activates exactly that member.
     private static readonly System.Windows.Media.Brush CascadeHoverBrush =
         new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x00, 0x78, 0xD4));
+    private static readonly System.Windows.Media.Brush DefaultSubBorderBrush =
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromArgb(0x1A, 0, 0, 0));
 
-    private Border? _hoverThumb;
+    // Border currently highlighted (background-only), or null. Cleared on
+    // every new hover so the old one doesn't linger when the pointer
+    // jumps to a different member (WPF MouseLeave doesn't always fire on
+    // rapid jumps).
+    private Border? _hoverSub;
+    private IntPtr _hoverHwnd;
 
-    /// <summary>Highlight (or restore) the preview border of one member —
-    /// sub-card thumbs by hwnd, the head via its declarative ThumbBorder.
-    /// Returns the highlighted Border for state tracking.</summary>
-    private void SetCascadeHover(IntPtr hwnd, bool on)
+    private static readonly System.Windows.Media.Brush HoveredSubBackground =
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xEA, 0xF3, 0xFF));
+
+    /// <summary>Highlight the entire sub-card for one member, or — when
+    /// stackOutline=true — draw a single blue border around the cascade's
+    /// outermost edge. Two independent visual states; only one is active
+    /// at a time (outline takes precedence).</summary>
+    private void SetCascadeHover(IntPtr hwnd, bool on, bool stackOutline = false)
     {
-        Border? tb = null;
-        var src = "member";
-        if (_cascadeThumbs.TryGetValue(hwnd, out var t)) tb = t;
-        else
-        {
-            // The head has no sub-card: its ThumbBorder comes from the
-            // template (its exposed half is the head's clickable region).
-            src = "head";
-            var vm = _windows.FirstOrDefault(w => w.Hwnd == hwnd);
-            if (vm is not null) tb = FindThumbBorder(vm) as Border;
-        }
-        WindowSwitcherWpf.Services.Log.Info("CascadeHover",
-            $"{src} hwnd=0x{hwnd:X} on={on} found={tb is not null}");
-        if (tb is null) return;
         if (on)
         {
-            tb.BorderBrush = CascadeHoverBrush;
-            tb.BorderThickness = new Thickness(2);
-            _hoverThumb = tb;
+            // Mutually exclusive: a sub hover hides the head's outline.
+            if (!stackOutline) HideStackOutline();
+
+            // Always restore the previous sub's background first (cheap
+            // when re-entering same hwnd). This is the single source of
+            // truth — WPF MouseLeave doesn't always fire on rapid jumps.
+            if (_hoverSub is not null && _hoverSub != _hoverSubFor(hwnd))
+                RestoreCascadeSub(_hoverSub);
+            _hoverSub = null;
+            _hoverHwnd = IntPtr.Zero;
+
+            if (stackOutline)
+            {
+                if (_windows.FirstOrDefault(w => w.Hwnd == hwnd) is OverlayWindow headVm
+                    && _controller.StackInfoFor(hwnd) is { } st
+                    && st.Members.Count >= 2
+                    && FindCascadeContainer(headVm) is FrameworkElement root)
+                {
+                    ShowStackOutline(root, headVm, st);
+                }
+                return;
+            }
+
+            // Sub hover = subtle background highlight (no border). One at a
+            // time so the previous one never lingers.
+            if (_cascadeSubs.TryGetValue(hwnd, out var sub))
+            {
+                sub.Background = HoveredSubBackground;
+                _hoverSub = sub;
+                _hoverHwnd = hwnd;
+            }
         }
         else
         {
-            tb.BorderBrush = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromArgb(0x22, 0, 0, 0));
-            tb.BorderThickness = new Thickness(1);
-            if (ReferenceEquals(_hoverThumb, tb)) _hoverThumb = null;
+            if (stackOutline) { HideStackOutline(); return; }
+            // Clear the previous highlight unconditionally on any off call.
+            // The global pointer tracker (UpdateCascadeHoverFromPointer)
+            // calls off with the previous hwnd OR with Zero to mean "not
+            // over any sub" — both must release the highlight.
+            if (_hoverHwnd == hwnd || hwnd == IntPtr.Zero)
+            {
+                if (_hoverSub is not null) RestoreCascadeSub(_hoverSub);
+                _hoverSub = null;
+                _hoverHwnd = IntPtr.Zero;
+            }
         }
     }
 
-    private void OnCascadeMouseEnter(object sender, MouseEventArgs e)
+    // ---------- Stack outer outline (整堆叠最外围一条蓝框) ----------
+    // Windows-11 native cascade: hover the head's exposed top-left patch
+    // (== first sub's left peek) → draw a single blue rectangle around the
+    // entire cascade's outermost edge. Implemented as a Border sized to
+    // the sub-cards' union rectangle, sitting in DropLayer (IsHitTestVisible
+    // = False so it never steals pointer events from sub-cards).
+    private Border? _stackOutline; // lazily created in DropLayer
+    private IntPtr _stackOutlinedHwnd;
+
+    private Border EnsureStackOutline()
     {
-        if (sender is FrameworkElement { Tag: IntPtr h }) SetCascadeHover(h, true);
+        if (_stackOutline is null)
+        {
+            _stackOutline = new Border
+            {
+                BorderBrush = CascadeHoverBrush,
+                BorderThickness = new Thickness(2),
+                CornerRadius = new CornerRadius(8),
+                Background = System.Windows.Media.Brushes.Transparent,
+                Visibility = Visibility.Collapsed,
+                IsHitTestVisible = false,
+            };
+            DropLayer.Children.Add(_stackOutline);
+        }
+        return _stackOutline;
     }
 
-    private void OnCascadeMouseLeave(object sender, MouseEventArgs e)
+    private void ShowStackOutline(FrameworkElement root, OverlayWindow headVm,
+        SwitcherController.WindowStackInfo st)
     {
-        if (sender is FrameworkElement { Tag: IntPtr h }) SetCascadeHover(h, false);
+        var outline = EnsureStackOutline();
+        outline.Visibility = Visibility.Visible;
+        // Compute the union of the head's full card (in WindowsList coords)
+        // + every sub card, all also in WindowsList coords. The outermost
+        // left edge is the head's x0, the right is the last sub's x1.
+        var headTl = root.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+        var headBr = root.TransformToVisual(WindowsList).Transform(
+            new Point(root.ActualWidth, root.ActualHeight));
+        double minX = headTl.X, minY = headTl.Y, maxX = headBr.X, maxY = headBr.Y;
+        for (var i = 1; i < st.Members.Count; i++)
+        {
+            if (!_cascadeSubs.TryGetValue(st.Members[i].Hwnd, out var sub)) continue;
+            var tl = sub.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+            var br = sub.TransformToVisual(WindowsList).Transform(
+                new Point(sub.ActualWidth, sub.ActualHeight));
+            minX = Math.Min(minX, tl.X);
+            minY = Math.Min(minY, tl.Y);
+            maxX = Math.Max(maxX, br.X);
+            maxY = Math.Max(maxY, br.Y);
+        }
+        // Convert to DropLayer coords. Slight outset so the border sits on
+        // the edge instead of inside it.
+        var layer = DropLayer;
+        var origin = layer.TransformToVisual(WindowsList).Inverse.Transform(new Point(0, 0));
+        var dx = minX - origin.X - 2;
+        var dy = minY - origin.Y - 2;
+        var dw = (maxX - minX) + 4;
+        var dh = (maxY - minY) + 4;
+        Canvas.SetLeft(outline, dx);
+        Canvas.SetTop(outline, dy);
+        outline.Width = dw;
+        outline.Height = dh;
+        _stackOutlinedHwnd = headVm.Hwnd;
     }
 
-    /// <summary>Hover on the head's exposed (left) half — the declarative
-    /// panel is hit only where no cascade sub-card covers it.</summary>
+    private void HideStackOutline()
+    {
+        if (_stackOutline is not null) _stackOutline.Visibility = Visibility.Collapsed;
+        _stackOutlinedHwnd = IntPtr.Zero;
+    }
+
+    /// <summary>The template card's root Grid (where cascade sub-cards are
+    /// injected). Equivalent to the existing FindName("CardRoot") path but
+    /// we need the panel itself for the union rect.</summary>
+    private FrameworkElement? FindCascadeContainer(OverlayWindow headVm)
+    {
+        if (WindowsList.ItemContainerGenerator.ContainerFromItem(headVm)
+            is not ContentPresenter cp) return null;
+        return WindowsList.ItemTemplate?.FindName("CardRoot", cp) as Grid;
+    }
+
+    private Border? _hoverSubFor(IntPtr hwnd) =>
+        _cascadeSubs.TryGetValue(hwnd, out var s) ? s : null;
+
+    private static readonly System.Windows.Media.Brush DefaultSubBackground =
+        new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF));
+
+    private void RestoreCascadeSub(Border b) => b.Background = DefaultSubBackground;
+
+    /// <summary>Resolve which sub (if any) the cursor sits over, then update
+    /// the single highlighted sub. Called on every RootBorder mouse move so
+    /// hover state is always in sync with cursor position — eliminates the
+    /// stale-highlight bug where sub-A stays blue after the cursor jumps
+    /// to sub-B without WPF firing sub-A's MouseLeave.</summary>
+    private void UpdateCascadeHoverFromPointer(Point p)
+    {
+        if (_controller.IsInStackView) { SetCascadeHover(IntPtr.Zero, false); return; }
+        var card = CardAt(p);
+        if (card is null) { SetCascadeHover(IntPtr.Zero, false); return; }
+        var vm = card.DataContext as OverlayWindow;
+        if (vm is null) { SetCascadeHover(IntPtr.Zero, false); return; }
+        var st = _controller.StackInfoFor(vm.Hwnd);
+        if (st is null || st.Members.Count < 2) { SetCascadeHover(IntPtr.Zero, false); return; }
+        var cardPos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
+        var localX = p.X - cardPos.X;
+        // Use the head's natural cascade width (ThumbWidth + 16) — not
+        // card.ActualWidth — because the head template is rendered at the
+        // head's own cardW and the sub geometry is computed in that
+        // coordinate space (subs are positioned by LayoutCascades at
+        // i*peek from the head's screen origin).
+        var cardW = vm.ThumbWidth + 16;
+        var peek = cardW / 2;
+        var target = st.Members[0].Hwnd; // head: the leftmost exposed patch
+        for (var i = 1; i < st.Members.Count; i++)
+        {
+            var sStart = i * peek;
+            var sEnd = sStart + peek;
+            if (localX >= sStart && localX < sEnd)
+            {
+                target = st.Members[i].Hwnd;
+                break;
+            }
+        }
+        SetCascadeHover(target, true);
+    }
+
+    /// <summary>Hover on the head's exposed top-left patch. That patch is
+    /// the only place where the head is "visible" without a sub on top —
+    /// here we draw the whole-stack outline. Anywhere else on the head is
+    /// actually covered by a sub-card, so a sub-card hover takes over
+    /// (handled by OnCascadeMouseEnter).</summary>
     private void OnHeadHoverEnter(object sender, MouseEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: OverlayWindow ow })
-            SetCascadeHover(ow.Hwnd, true);
+        if (sender is not FrameworkElement fe || fe.DataContext is not OverlayWindow ow) return;
+        var tb = FindThumbBorder(ow) as Border;
+        if (tb is null) return;
+        var p = e.GetPosition(tb);
+        if (p.X > tb.ActualWidth / 2 || p.Y > tb.ActualHeight / 2) return;
+        SetCascadeHover(ow.Hwnd, true, stackOutline: true);
     }
 
     private void OnHeadHoverLeave(object sender, MouseEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: OverlayWindow ow })
-            SetCascadeHover(ow.Hwnd, false);
+            SetCascadeHover(ow.Hwnd, false, stackOutline: true);
     }
 
     private void OnCascadePinClick(object sender, MouseButtonEventArgs e)
@@ -1531,6 +1746,13 @@ public partial class SwitcherOverlay : Window
 
     private void OnOverlayDragMove(object sender, MouseEventArgs e)
     {
+        // Hover tracking on every cursor move: subs live in DropLayer
+        // (their own hit-test target steals MouseMove from the RootBorder),
+        // so we can't rely on RootBorder-only events. The single source of
+        // truth is the cursor's grid position — re-resolve the active sub
+        // on every move so the previous one is guaranteed to clear.
+        UpdateCascadeHoverFromPointer(e.GetPosition(WindowsList));
+
         if (!_dragActive) return;
         if (e.LeftButton != MouseButtonState.Pressed) { EndDrag(); return; }
         var p = e.GetPosition(WindowsList);

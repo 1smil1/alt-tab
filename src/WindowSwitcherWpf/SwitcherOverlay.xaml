@@ -25,7 +25,7 @@
             SnapsToDevicePixels="True"
             UseLayoutRounding="True"
             MouseLeftButtonUp="OnOverlayMouseUp"
-            MouseMove="OnOverlayDragMove">
+            PreviewMouseMove="OnOverlayDragMove">
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
@@ -146,9 +146,14 @@
                             <Grid x:Name="CardRoot">
                                 <!-- Group accent strip: 3px hue line at the
                                      card top; brightens when any card of
-                                     the same app group is hovered. -->
+                                     the same app group is hovered. Capped
+                                     to the head card's width so the strip
+                                     doesn't bleed across the whole cascade
+                                     when CardRoot widens to fit subs. -->
                                 <Rectangle Height="3"
                                            VerticalAlignment="Top"
+                                           HorizontalAlignment="Left"
+                                           Width="{Binding ThumbWidth, RelativeSource={RelativeSource AncestorType=Border, AncestorLevel=1}}"
                                            Margin="14,3,14,0"
                                            RadiusX="1.5" RadiusY="1.5"
                                            Fill="{Binding GroupStripBrush}"/>
