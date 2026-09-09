@@ -9,3 +9,7 @@ obj/
 .idea/
 *.user
 shots/
+
+# Installer build artifacts
+installer/Output/
+installer/publish/
