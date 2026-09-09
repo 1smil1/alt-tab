@@ -85,10 +85,10 @@ public sealed class ThumbnailHost : HwndHost
         if (w <= 0 || h <= 0) { w = 100; h = 60; }
         var props = new DWM_THUMBNAIL_PROPERTIES
         {
-            dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_VISIBLE
-                    | DWM_TNP_SOURCECLIENTAREA,
+            // NB: never add DWM_TNP_SOURCECLIENTAREA — it ghosts Mica
+            // backdrop windows (alpha-0 raw surface).
+            dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_VISIBLE,
             fVisible = true,
-            fSourceClientAreaOnly = true,
             rcDestination = new RECT { Left = 0, Top = 0, Right = w, Bottom = h },
             rcSource = new RECT(),
         };

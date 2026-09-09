@@ -27,12 +27,14 @@ public sealed class ThumbnailHandle : IDisposable
     public bool Update(Rectangle destination, Rectangle source, bool visible = true)
     {
         if (!IsValid) return false;
+        // NB: never add DWM_TNP_SOURCECLIENTAREA here — it ghosts Mica
+        // backdrop windows (alpha-0 raw surface). Keep rcSource
+        // window-relative, like native Alt+Tab.
         var props = new DWM_THUMBNAIL_PROPERTIES
         {
             dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_VISIBLE
-                    | DWM_TNP_SOURCECLIENTAREA | DWM_TNP_OPACITY,
+                    | DWM_TNP_OPACITY,
             fVisible = visible,
-            fSourceClientAreaOnly = true,
             opacity = 255,
             rcDestination = new RECT { Left = destination.Left, Top = destination.Top, Right = destination.Right, Bottom = destination.Bottom },
             rcSource = new RECT { Left = source.Left, Top = source.Top, Right = source.Right, Bottom = source.Bottom },

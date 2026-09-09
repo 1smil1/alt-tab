@@ -908,14 +908,17 @@ public partial class SwitcherOverlay : Window
         foreach (var w in _windows) w.HasLivePreview = false;
     }
 
-    /// <summary>Source window's client size for thumbnail source-rect math.
-    /// A minimized window's client rect degenerates to 0x0 — fall back to
-    /// the danced surface's RESTORED size from rcNormalPosition.</summary>
-    private static NativeMethods.RECT ClientRectFor(IntPtr hwnd)
+    /// <summary>Source window's FULL rect (window-relative, frame included)
+    /// for thumbnail source-rect math. A minimized window's rect sits at
+    /// -32000 with a degenerate size — fall back to the danced surface's
+    /// RESTORED size from rcNormalPosition.</summary>
+    private static NativeMethods.RECT WindowRectFor(IntPtr hwnd)
     {
-        NativeMethods.GetClientRect(hwnd, out var crc);
-        if (crc.Right - crc.Left >= 50 && crc.Bottom - crc.Top >= 50)
-            return crc;
+        NativeMethods.GetWindowRect(hwnd, out var wr);
+        var w = wr.Right - wr.Left;
+        var h = wr.Bottom - wr.Top;
+        if (w >= 50 && h >= 50 && wr.Left > -30000)
+            return new NativeMethods.RECT { Left = 0, Top = 0, Right = w, Bottom = h };
         var wp = new NativeMethods.WINDOWPLACEMENT
         {
             length = (uint)System.Runtime.InteropServices.Marshal
@@ -924,7 +927,7 @@ public partial class SwitcherOverlay : Window
         if (NativeMethods.GetWindowPlacement(hwnd, ref wp))
         {
             var nr = wp.rcNormalPosition;
-            crc = new NativeMethods.RECT
+            return new NativeMethods.RECT
             {
                 Left = 0,
                 Top = 0,
@@ -932,17 +935,17 @@ public partial class SwitcherOverlay : Window
                 Bottom = nr.Bottom - nr.Top,
             };
         }
-        return crc;
+        return new NativeMethods.RECT { Left = 0, Top = 0, Right = w, Bottom = h };
     }
 
-    /// <summary>Centered client-area sub-rect whose aspect matches the dest
+    /// <summary>Centered window sub-rect whose aspect matches the dest
     /// rect. DWM stretches source→dest, so without this a taller dest than
     /// the window aspect would distort the preview; with it the preview
     /// crops like the native Alt+Tab switcher instead.</summary>
     private static NativeMethods.RECT CropSourceFor(IntPtr hwnd, double destW, double destH)
     {
         var src = new NativeMethods.RECT { Left = 0, Top = 0 };
-        var crc = ClientRectFor(hwnd);
+        var crc = WindowRectFor(hwnd);
         var cw = crc.Right - crc.Left;
         var ch = crc.Bottom - crc.Top;
         src.Right = cw;
@@ -991,11 +994,16 @@ public partial class SwitcherOverlay : Window
                 var br = el.PointToScreen(new Point(el.ActualWidth, el.ActualHeight));
                 var destW = (int)(br.X - tl.X);
                 var destH = (int)(br.Y - tl.Y);
+                // NB: never set DWM_TNP_SOURCECLIENTAREA / fSourceClientAreaOnly —
+                // it samples the raw redirection surface, where Mica/Acrylic
+                // backdrop windows (DWMWA_SYSTEMBACKDROP_TYPE) have an
+                // alpha-0 background, so the card shows a washed-out ghost.
+                // Window-relative rcSource (frame included) is what native
+                // Alt+Tab does and renders those windows correctly.
                 var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
                 {
                     dwFlags = NativeMethods.DWM_TNP_RECTDESTINATION
                               | NativeMethods.DWM_TNP_VISIBLE
-                              | NativeMethods.DWM_TNP_SOURCECLIENTAREA
                               | NativeMethods.DWM_TNP_RECTSOURCE,
                     rcDestination = new NativeMethods.RECT
                     {
@@ -1006,7 +1014,6 @@ public partial class SwitcherOverlay : Window
                     },
                     rcSource = CropSourceFor(w.Hwnd, destW, destH),
                     fVisible = true,
-                    fSourceClientAreaOnly = true,
                     opacity = 255,
                 };
                 NativeMethods.DwmUpdateThumbnailProperties(id, ref props);
@@ -1073,26 +1080,24 @@ public partial class SwitcherOverlay : Window
             };
             if (last)
             {
-                flags |= NativeMethods.DWM_TNP_SOURCECLIENTAREA
-                       | NativeMethods.DWM_TNP_RECTSOURCE;
-                props.fSourceClientAreaOnly = true;
+                // No DWM_TNP_SOURCECLIENTAREA (see UpdateLiveRects) — it
+                // ghosts Mica backdrop windows; window-relative rcSource
+                // is the native-Alt+Tab behavior.
+                flags |= NativeMethods.DWM_TNP_RECTSOURCE;
                 props.rcSource = CropSourceFor(m.Hwnd, visW, thumbHeight);
             }
             else
             {
-                // Source = left half of the CLIENT area. SOURCECLIENTAREA
-                // makes rcSource client-relative; without it DWM read the
-                // rect as window-relative and rendered nothing.
-                flags |= NativeMethods.DWM_TNP_RECTSOURCE
-                       | NativeMethods.DWM_TNP_SOURCECLIENTAREA;
-                props.fSourceClientAreaOnly = true;
-                var crc = ClientRectFor(m.Hwnd);
+                // Source = left half of the WINDOW rect (window-relative,
+                // frame included — same no-SOURCECLIENTAREA rule).
+                flags |= NativeMethods.DWM_TNP_RECTSOURCE;
+                var wrc = WindowRectFor(m.Hwnd);
                 props.rcSource = new NativeMethods.RECT
                 {
                     Left = 0,
                     Top = 0,
-                    Right = (crc.Right - crc.Left) / 2,
-                    Bottom = crc.Bottom - crc.Top,
+                    Right = (wrc.Right - wrc.Left) / 2,
+                    Bottom = wrc.Bottom - wrc.Top,
                 };
             }
             props.dwFlags = flags;

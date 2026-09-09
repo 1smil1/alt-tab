@@ -259,8 +259,12 @@ public sealed class WindowEnumerator
         "__wglDummyWindowFodder",
         "RECORDER_NOTIFY_WND",
         "MS_WebcheckMonitor",
-        "OpenCLIApp",
-        "Hotkey Manager",  // our own process
+        // "OpenCLIApp" 曾在此, 已删 — 那是具体工具的窗口标题, 不是
+        // Windows 原生脚手架; 若它回流成污染, 查它的结构特征再治。
+        // NB: 不要把真实应用标题加进来 — "Hotkey Manager" 曾在此被拉黑,
+        // 导致用户自己的热键管理器主窗口 (可见/thickframe/有标题) 在
+        // overlay 消失而原生 Alt+Tab 显示。隐藏辅助窗口由结构过滤
+        // (不可见/toolwindow/no-thickframe) 兜底, 不靠标题。
         "NVOGLDC invisible",  // NVIDIA overlay helper
         "wgpu Device Class",  // WebGPU helper
         "WxTrayIconMessageWindow",  // WeChat tray helper
@@ -276,16 +280,11 @@ public sealed class WindowEnumerator
         "SangforUDProtectExe",
     };
 
-    // Substring patterns that identify background helper processes.
-    // These are conventional Windows naming patterns (Service, Helper,
-    // Container, Server, Watcher, Overlay, Sync) — not app-specific
-    // names. Anything matching is almost certainly a service, not a
-    // user-facing application.
-    private static readonly string[] BackgroundProcessNamePatterns =
-    {
-        "Service", "Sync.", "Helper", "Watcher", "Container",
-        "Overlay", "wallpaper", "Sunshine", "Sangfor", "OneDrive",
-    };
+    // NB: 曾经还有一组按 exe 名子串杀后台进程的规则 (Service/Helper/
+    // Watcher/Container/Overlay/Sync./wallpaper/Sunshine/Sangfor/
+    // OneDrive/aw- 前缀), 已整体删除 — 它们全是真实应用的名字或泛化
+    // 词, 会误杀原生 Alt+Tab 会显示的用户窗口。黑名单只收 Windows
+    // 原生/运行时脚手架; 具体污染窗口优先用结构过滤治理。
 
     // Whitelist of real user processes that happen to live under
     // C:\Windows\System32 (terminals, task manager).
@@ -325,20 +324,11 @@ public sealed class WindowEnumerator
         }
         // C:\Windows\System32 executables are almost always services;
         // the only real user-facing ones are terminals, task manager,
-        // mmc, regedit, etc. — whitelisted above.
+        // mmc, regedit, etc. — whitelisted above. This + the Sangfor
+        // exact name are the whole remaining process-name blacklist.
         if (modulePath.StartsWith(@"C:\Windows\System32\", StringComparison.OrdinalIgnoreCase)
             && !System32Whitelist.Contains(fileName))
             return true;
-        // Conventional Windows background-helper naming patterns.
-        // These substrings are not app-specific; they identify the
-        // structural role of the process (service / helper / watcher
-        // / sync / container / overlay).
-        foreach (var pat in BackgroundProcessNamePatterns)
-        {
-            if (fileName.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0) return true;
-        }
-        // ActivityWatch helpers always start with "aw-".
-        if (fileName.StartsWith("aw-", StringComparison.OrdinalIgnoreCase)) return true;
         return false;
     }
 
