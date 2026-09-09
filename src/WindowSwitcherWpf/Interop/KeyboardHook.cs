@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
-using System.Windows.Input;
 using System.Windows.Threading;
 using WindowSwitcherWpf.Services;
 using static WindowSwitcherWpf.Interop.NativeMethods;
@@ -9,9 +9,13 @@ using static WindowSwitcherWpf.Interop.NativeMethods;
 namespace WindowSwitcherWpf.Interop;
 
 /// <summary>
-/// WH_KEYBOARD_LL global hook. v1 uses a separate hotkey (default Alt+`)
-/// so the system Alt+Tab is NOT intercepted. Trigger key is configurable
-/// via <see cref="TriggerVirtualKey"/> / <see cref="TriggerScanCode"/>.
+/// WH_KEYBOARD_LL global hook on a DEDICATED pump thread. LL 回调经安装线程
+/// 的消息循环派发 — 之前装在 UI 线程上, 开 overlay/GC 期间回调排队超过
+/// LowLevelHooksTimeout, Windows 把该次按键直接递给系统 = 原生 Alt+Tab
+/// 冒出来 (用户: 系统 alt tab 也起作用). 独立线程专职泵消息, 回调微秒级
+/// 返回, UI 重活走 BeginInvoke, 原生切换器不再漏出.
+/// Trigger key is configurable via <see cref="TriggerVirtualKey"/> /
+/// <see cref="TriggerScanCode"/>.
 /// </summary>
 public sealed class KeyboardHook : IDisposable
 {
@@ -49,11 +53,14 @@ public sealed class KeyboardHook : IDisposable
     private readonly Dispatcher _dispatcher;
     private readonly LowLevelKeyboardProc _proc;
     private IntPtr _hook = IntPtr.Zero;
+    private Thread? _pumpThread;
+    private uint _pumpThreadId;
+    private ManualResetEventSlim? _ready;
     private bool _altDown;
-    private bool _overlayOpen;
+    private volatile bool _overlayOpen;      // UI 线程 SetOverlayOpen 跨线程写
     // 一次直达状态: quick 修饰键是否按住 + 当前按住的数字 vk (0=无)
     private bool _quickModDown;
-    private uint _quickDigitVk;
+    private volatile uint _quickDigitVk;
 
     public KeyboardHook()
     {
@@ -63,18 +70,37 @@ public sealed class KeyboardHook : IDisposable
 
     public void Install()
     {
-        if (_hook != IntPtr.Zero) return;
+        if (_pumpThread is not null) return;
+        _ready = new ManualResetEventSlim();
+        _pumpThread = new Thread(HookThreadPump)
+        {
+            IsBackground = true,
+            Name = "KeyboardHookPump",
+        };
+        _pumpThread.Start();
+        _ready.Wait(2000);
+    }
+
+    // LL 钩子回调在本线程的消息循环里派发 — 永不被 UI 线程阻塞.
+    private void HookThreadPump()
+    {
+        _pumpThreadId = GetCurrentThreadId();
         var hMod = GetModuleHandleW(null);
         _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, hMod, 0);
         if (_hook == IntPtr.Zero)
         {
             var err = Marshal.GetLastWin32Error();
             Log.Error("KeyboardHook", $"SetWindowsHookEx failed err={err}");
+            _ready!.Set();
+            return;
         }
-        else
-        {
-            Log.Info("KeyboardHook", "installed");
-        }
+        Log.Info("KeyboardHook", "installed (dedicated pump thread)");
+        _ready!.Set();
+        while (GetMessageW(out var msg, IntPtr.Zero, 0, 0) > 0)
+            DispatchMessageW(ref msg);
+        UnhookWindowsHookEx(_hook);
+        _hook = IntPtr.Zero;
+        Log.Info("KeyboardHook", "pump exited, hook removed");
     }
 
     public void SetOverlayOpen(bool open)
@@ -85,12 +111,11 @@ public sealed class KeyboardHook : IDisposable
 
     public void Dispose()
     {
-        if (_hook != IntPtr.Zero)
-        {
-            UnhookWindowsHookEx(_hook);
-            _hook = IntPtr.Zero;
-            Log.Info("KeyboardHook", "disposed");
-        }
+        if (_pumpThread is null) return;
+        PostThreadMessageW(_pumpThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+        _pumpThread.Join(1000);
+        _pumpThread = null;
+        Log.Info("KeyboardHook", "disposed");
     }
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -100,7 +125,9 @@ public sealed class KeyboardHook : IDisposable
         var isUp = (data.flags & LLKHF_UP) != 0;
         var vk = data.vkCode;
         var sc = data.scanCode;
-        var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+        // WPF Keyboard.Modifiers 有 UI 线程亲和 — 专用钩子线程上用原生查询.
+        var shift = (GetAsyncKeyState(0xA0) & 0x8000) != 0
+                 || (GetAsyncKeyState(0xA1) & 0x8000) != 0;
 
         // 修饰键跟踪: Alt (overlay 触发/提交) + quick 修饰键 (一次直达).
         // Alt 三键同时属于两个角色 — 都要更新, 缺一不可.
@@ -202,6 +229,38 @@ public sealed class KeyboardHook : IDisposable
 
     private static int DigitFromVk(uint vk) =>
         vk >= 0x60 ? (int)(vk - 0x60) : (int)(vk - 0x30);
+
+    // ---------- 专用泵线程的 message loop P/Invoke (self-contained) ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int ptX;
+        public int ptY;
+    }
+
+    private const uint WM_QUIT = 0x0012;
+
+    [DllImport("user32.dll")]
+    private static extern int GetMessageW(out MSG msg, IntPtr hwnd, uint min, uint max);
+
+    [DllImport("user32.dll")]
+    private static extern bool DispatchMessageW(ref MSG msg);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostThreadMessageW(uint threadId, uint msg,
+        IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     private void Fire(Action? action)
     {

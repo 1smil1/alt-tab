@@ -84,4 +84,9 @@ public sealed class PinDefinition
 /// 固定则一直存在, 除非它没有固定): 真身留在编号区由 pin 认领, 0 号只是
 /// 展示. 未固定的上一窗口没有真身卡 — 该卡是唯一卡, 标志保持 false.</summary>
 public sealed record SlotWindow(WindowEntry Entry, int Slot, bool IsPinned,
-    bool IsCurrentCopy = false, bool IsSlot0Copy = false);
+    bool IsCurrentCopy = false, bool IsSlot0Copy = false)
+{
+    /// <summary>纯展示副本 (-2 当前窗口副本 / 0 号位副本): 不吃蓝框、
+    /// 不做光标停靠点、不被数字寻址 — 蓝框永远画在同 hwnd 的真卡上。</summary>
+    public bool IsCardCopy => IsCurrentCopy || IsSlot0Copy;
+}

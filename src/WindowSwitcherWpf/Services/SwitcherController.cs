@@ -134,7 +134,8 @@ public sealed class SwitcherController
         Refresh();
         RebuildFlat(foreground);
         // 预选 0 号卡 (上个窗口) — Windows Alt+Tab 手感: 快速松开 = 切到
-        // 上个窗口. 复制卡占 index 0, 所以预选 index 1.
+        // 上个窗口. 复制卡占 index 0, 所以预选 index 1; 0 位是副本时副本
+        // 就是停靠卡, 蓝框画它自己 (用户: 0 就是 0 的蓝色框).
         ActiveFlatIndex = _flat.Count > 1 ? 1 : 0;
         ActiveGroupIndex = 0;
         ActiveWindowIndex = 0;
@@ -248,7 +249,7 @@ public sealed class SwitcherController
         _activeStackId = null;
         if (head is IntPtr h)
         {
-            var i = _flat.FindIndex(w => w.Hwnd == h);
+            var i = FlatIndexForSelection(h);
             ActiveFlatIndex = i >= 0 ? i : 0;
         }
         StateChanged?.Invoke();
@@ -748,6 +749,21 @@ public sealed class SwitcherController
         return IntPtr.Zero;
     }
 
+    /// <summary>选中解析统一规则: 同 hwnd 双卡 (-2 副本 / 0号副本) 时取
+    /// 真卡 index — 副本不吃蓝框、不做光标停靠点 (用户: 光标依次递进,
+    /// 蓝框只画真卡); 只剩副本时取首个匹配. 未找到返回 -1.</summary>
+    private int FlatIndexForSelection(IntPtr hwnd)
+    {
+        var first = -1;
+        for (var i = 0; i < _flat.Count && i < Slotted.Count; i++)
+        {
+            if (_flat[i].Hwnd != hwnd) continue;
+            if (!Slotted[i].IsCardCopy) return i;
+            if (first < 0) first = i;
+        }
+        return first;
+    }
+
     /// <summary>Re-points ActiveFlatIndex at the previously selected hwnd
     /// after the list composition changed (pin toggle / drag).</summary>
     private void KeepSelection()
@@ -755,7 +771,7 @@ public sealed class SwitcherController
         var sel = _flat.Count == 0
             ? IntPtr.Zero
             : _flat[Math.Min(ActiveFlatIndex, _flat.Count - 1)].Hwnd;
-        var i = _flat.FindIndex(w => w.Hwnd == sel);
+        var i = FlatIndexForSelection(sel);
         ActiveFlatIndex = i >= 0 ? i : 0;
     }
 
@@ -767,7 +783,9 @@ public sealed class SwitcherController
 
     /// <summary>Flat card selection with wrap-around; used by Tab advance
     /// and by the arrow-key grid navigation in the overlay. Wraps within
-    /// the ACTIVE nav list (full cards, or stack members in the sub view).</summary>
+    /// the ACTIVE nav list (full cards, or stack members in the sub view).
+    /// 每张卡 (含 -2 副本 / 0号副本) 都是普通停靠点 — 蓝框按停靠索引画在
+    /// 那张卡本身 (用户: 0 就是 0 的蓝色框, 到 2 的时候只有 2 的)。</summary>
     public void SelectFlat(int index)
     {
         var n = Nav.Count;
