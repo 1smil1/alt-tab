@@ -35,6 +35,9 @@ public static class NativeMethods
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
@@ -212,6 +215,7 @@ public static class NativeMethods
     public const int DWMWA_HAS_ICONIC_BITMAP = 10;
 
     public const int SW_SHOWNOACTIVATE = 4;
+    public const int SW_MINIMIZE = 6;
     public const int SW_SHOWMINNOACTIVE = 7;
 
     [DllImport("kernel32.dll")]

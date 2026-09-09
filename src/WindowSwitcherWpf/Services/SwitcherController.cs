@@ -873,10 +873,20 @@ public sealed class SwitcherController
     }
 
     /// <summary>Activate a window directly (quick jump path — no overlay,
-    /// no selection bookkeeping).</summary>
+    /// no selection bookkeeping). 目标已是前台时改为最小化 (用户: 本来就是
+    /// 顶层, 再按就是缩小化 — 即目标窗口同 HWND 也出现在标签 -2 复制卡上
+    /// 时, 再按一次收起); 已最小化却仍是前台的边缘态走激活 = 恢复.</summary>
     public void QuickActivate(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return;
+        if (hwnd == NativeMethods.GetForegroundWindow() && !NativeMethods.IsIconic(hwnd))
+        {
+            // ShowWindowAsync: 控制台类宿主窗口同步 ShowWindow 可能阻塞钩子链.
+            NativeMethods.ShowWindowAsync(hwnd, NativeMethods.SW_MINIMIZE);
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"quick jump toggle → minimize 0x{hwnd.ToInt64():X}");
+            return;
+        }
         var entry = _flat.Find(w => w.Hwnd == hwnd);
         WindowSwitcherWpf.Services.Log.Info("Controller",
             $"quick jump 0x{hwnd.ToInt64():X} '{entry?.Title}'");
