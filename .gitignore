@@ -1,0 +1,15 @@
+# Rust reference project (read-only study material, not part of this repo)
+/window-switcher/
+
+# Build artifacts
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+*.user
+shots/
+
+# Installer build artifacts
+installer/Output/
+installer/publish/

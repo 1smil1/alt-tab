@@ -1,0 +1,12 @@
+<Window x:Class="WindowSwitcherWpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WindowSwitcherHost"
+        Width="0" Height="0"
+        ShowInTaskbar="False"
+        WindowStartupLocation="Manual"
+        Left="-32000" Top="-32000"
+        Visibility="Collapsed"
+        ResizeMode="NoResize"
+        WindowStyle="None">
+</Window>

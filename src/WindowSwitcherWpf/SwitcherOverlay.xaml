@@ -1,0 +1,349 @@
+<Window x:Class="WindowSwitcherWpf.SwitcherOverlay"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Window Switcher"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True"
+        Focusable="False"
+        ShowActivated="False"
+        WindowStartupLocation="CenterScreen"
+        Background="Transparent"
+        SizeToContent="WidthAndHeight">
+    <WindowChrome.WindowChrome>
+        <WindowChrome GlassFrameThickness="-1" CaptionHeight="0"
+                      ResizeBorderThickness="0" CornerRadius="0"
+                      UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
+    <Border x:Name="RootBorder"
+            Background="#59FFFFFF"
+            BorderBrush="#3AFFFFFF"
+            BorderThickness="1"
+            CornerRadius="12"
+            Padding="16"
+            SnapsToDevicePixels="True"
+            UseLayoutRounding="True"
+            MouseLeftButtonUp="OnOverlayMouseUp"
+            PreviewMouseMove="OnOverlayDragMove">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <!-- Sub view banner (子标签页面): stack title + member count +
+                 gesture hints; replaces the main header while active. -->
+            <StackPanel x:Name="StackHeader"
+                        Grid.Row="0"
+                        HorizontalAlignment="Left"
+                        Orientation="Horizontal"
+                        Visibility="Collapsed"
+                        Margin="0,0,0,10">
+                <TextBlock Text="🗂"
+                           FontSize="14"
+                           VerticalAlignment="Center"
+                           Margin="0,0,6,0"/>
+                <TextBlock x:Name="StackTitleText"
+                           FontSize="14"
+                           FontWeight="Bold"
+                           Foreground="#FF202020"
+                           VerticalAlignment="Center"/>
+                <TextBlock x:Name="StackCountText"
+                           FontSize="13"
+                           FontWeight="Bold"
+                           Foreground="#FF0078D4"
+                           VerticalAlignment="Center"
+                           Margin="6,0,0,0"/>
+                <TextBlock Text="  → ← / Alt+` 切换 · 数字跳成员 · Esc 返回主页面 · 拖出网格外=剥离"
+                           FontSize="11"
+                           Foreground="#FF6A6A6A"
+                           VerticalAlignment="Center"
+                           Margin="10,0,0,0"/>
+            </StackPanel>
+            <!-- Header (右上角): template picker, smart-sort picker + apply,
+                 export — all data from the exe-adjacent config.json. -->
+            <StackPanel x:Name="MainHeader"
+                        Grid.Row="0"
+                        HorizontalAlignment="Right"
+                        Orientation="Horizontal"
+                        Margin="0,0,0,10">
+                <TextBlock Text="模板:"
+                           FontSize="12"
+                           Foreground="#FF404040"
+                           VerticalAlignment="Center"
+                           Margin="0,0,5,0"/>
+                <ComboBox x:Name="TemplateCombo"
+                          Width="130"
+                          FontSize="12"
+                          ToolTip="应用模板：已有标签和模板一一对应变成固定"
+                          SelectionChanged="OnTemplateSelected"/>
+                <TextBlock Text="排序:"
+                           FontSize="12"
+                           Foreground="#FF404040"
+                           VerticalAlignment="Center"
+                           Margin="12,0,5,0"/>
+                <ComboBox x:Name="SortCombo"
+                          Width="130"
+                          FontSize="12"
+                          ToolTip="智能排序方法（来自 config.json，可重复应用）"
+                          SelectionChanged="OnSortSelected"/>
+                <Button x:Name="SortApplyButton"
+                        Content="应用"
+                        FontSize="12"
+                        Padding="8,2"
+                        Margin="6,0,0,0"
+                        ToolTip="再次应用当前选中的智能排序"
+                        Click="OnSortApply"/>
+                <Button x:Name="ExportButton"
+                        Content="导出"
+                        FontSize="12"
+                        Padding="8,2"
+                        Margin="6,0,0,0"
+                        ToolTip="把当前槽位布局导出为模板（存入 config.json）"
+                        Click="OnExportClick"/>
+                <Button x:Name="SettingsButton"
+                        Content="⚙ 设置"
+                        FontSize="12"
+                        Padding="8,2"
+                        Margin="10,0,0,0"
+                        ToolTip="打开设置：快捷键 / 智能排序 / 模板"
+                        Click="OnSettingsClick"/>
+            </StackPanel>
+            <ScrollViewer x:Name="Scroller"
+                          Grid.Row="1"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl x:Name="WindowsList" HorizontalAlignment="Left">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <!-- 选中蓝框与 pin 黄框同显且不重叠: 蓝框画在 Card
+                             外围的 SelectionRing 上 (未选中 = 透明 4px padding,
+                             占位恒定, 选中 = thickness 0→4, padding+thickness
+                             恒为 4 → Card 位置分毫不动); 黄框仍是 Card 自己
+                             的 border (IsPinned trigger). -->
+                        <Border x:Name="SelectionRing"
+                                Margin="2"
+                                Padding="4"
+                                CornerRadius="12">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="BorderBrush" Value="Transparent"/>
+                                    <Setter Property="BorderThickness" Value="0"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                            <Setter Property="BorderBrush" Value="#FF0078D4"/>
+                                            <Setter Property="BorderThickness" Value="4"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                        <Border x:Name="Card"
+                                CornerRadius="8"
+                                Cursor="Hand"
+                                MouseLeftButtonDown="OnCardMouseDown"
+                                MouseMove="OnCardMouseMove"
+                                MouseLeftButtonUp="OnCardClick"
+                                MouseEnter="OnCardMouseEnter"
+                                MouseLeave="OnCardMouseLeave">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <!-- BorderBrush/Thickness live here (not on
+                                         the element) so the pin trigger can
+                                         actually override them — local values
+                                         always beat style triggers. -->
+                                    <Setter Property="BorderBrush" Value="#1A000000"/>
+                                    <Setter Property="BorderThickness" Value="1"/>
+                                    <Setter Property="Background" Value="#FFFFFFFF"/>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Background" Value="#EAF3FF"/>
+                                        </Trigger>
+                                        <!-- 固定 = permanent pin-colored frame. -->
+                                        <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                            <Setter Property="BorderBrush" Value="#FFD97706"/>
+                                            <Setter Property="BorderThickness" Value="4"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <Grid x:Name="CardRoot">
+                                <!-- Group accent strip: 3px hue line at the
+                                     card top; brightens when any card of
+                                     the same app group is hovered. Capped
+                                     to the head card's width so the strip
+                                     doesn't bleed across the whole cascade
+                                     when CardRoot widens to fit subs. -->
+                                <Rectangle Height="3"
+                                           VerticalAlignment="Top"
+                                           HorizontalAlignment="Left"
+                                           Width="{Binding ThumbWidth, RelativeSource={RelativeSource AncestorType=Border, AncestorLevel=1}}"
+                                           Margin="14,3,14,0"
+                                           RadiusX="1.5" RadiusY="1.5"
+                                           Fill="{Binding GroupStripBrush}"/>
+                            <StackPanel>
+                                <Grid Margin="8,7,8,7">
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                                        <!-- Slot number badge sits top-left, in
+                                             front of the title logo (数字放左上
+                                             角，标题logo前面): 0 = most recent,
+                                             1..10 managed slots, hidden if
+                                             unmanaged. -->
+                                        <Border Background="{Binding GroupBadgeBrush}"
+                                                CornerRadius="4"
+                                                Margin="0,0,5,0"
+                                                VerticalAlignment="Center"
+                                                Visibility="{Binding BadgeVisibility}"
+                                                ToolTip="Alt+数字 直达此标签">
+                                            <TextBlock Text="{Binding SlotBadge}"
+                                                       FontSize="10"
+                                                       FontWeight="Bold"
+                                                       Foreground="#FF5A5A5A"
+                                                       Margin="4,1"/>
+                                        </Border>
+                                        <!-- Stack member count: ×N badge right
+                                             after the slot digit (堆叠共用一
+                                             个数字, N = 成员数). -->
+                                        <Border Background="{Binding GroupBadgeBrush}"
+                                                CornerRadius="4"
+                                                Margin="0,0,5,0"
+                                                VerticalAlignment="Center"
+                                                Visibility="{Binding StackBadgeVisibility}"
+                                                ToolTip="堆叠: Alt+数字 进子页面">
+                                            <TextBlock Text="{Binding StackBadge}"
+                                                       FontSize="10"
+                                                       FontWeight="Bold"
+                                                       Foreground="#FF5A5A5A"
+                                                       Margin="4,1"/>
+                                        </Border>
+                                        <Image Width="20" Height="20"
+                                               VerticalAlignment="Center"
+                                               Source="{Binding Icon}"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        <TextBlock x:Name="TitleText"
+                                                   Text="{Binding DisplayTitle}"
+                                                   Foreground="#202020"
+                                                   FontSize="12"
+                                                   FontWeight="SemiBold"
+                                                   VerticalAlignment="Center"
+                                                   Margin="7,0,0,0"
+                                                   MaxWidth="230"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                    <!-- Hover tool zone on the right: an OPAQUE
+                                         white patch that covers the title's
+                                         tail (右上角变白色区域) with pin/close
+                                         inside. Opacity keeps its footprint
+                                         constant — the card's width/height NEVER
+                                         change on hover (样式不能再变). -->
+                                    <Border HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            CornerRadius="4">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="Transparent"/>
+                                                <Setter Property="Opacity" Value="0"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ElementName=Card, Path=IsMouseOver}" Value="True">
+                                                        <Setter Property="Background" Value="#FFFFFFFF"/>
+                                                        <Setter Property="Opacity" Value="1"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border Background="Transparent"
+                                                    CornerRadius="4"
+                                                    Margin="2,0"
+                                                    Width="20" Height="20"
+                                                    MouseLeftButtonDown="OnToolDown"
+                                                    MouseLeftButtonUp="OnPinClick"
+                                                    ToolTip="固定此槽位">
+                                                <TextBlock Text="📌"
+                                                           FontSize="10"
+                                                           Foreground="{Binding PinBrush}"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+                                            <Border Background="Transparent"
+                                                    CornerRadius="4"
+                                                    Margin="2,0"
+                                                    Width="20" Height="20"
+                                                    MouseLeftButtonDown="OnToolDown"
+                                                    MouseLeftButtonUp="OnCloseClick"
+                                                    ToolTip="关闭窗口">
+                                                <TextBlock Text="✕"
+                                                           FontSize="11"
+                                                           Foreground="#FF616161"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+                                <Border x:Name="ThumbBorder"
+                                        CornerRadius="6"
+                                        Background="#FFEFEFEF"
+                                        BorderBrush="#22000000"
+                                        BorderThickness="1"
+                                        Margin="7,0,7,7"
+                                        Height="200"
+                                        Width="{Binding ThumbWidth}"
+                                        ClipToBounds="True">
+                                    <Grid>
+                                        <Image x:Name="ThumbImage"
+                                               Source="{Binding Thumbnail}"
+                                               Height="200"
+                                               Stretch="UniformToFill"
+                                               Visibility="{Binding ThumbVisibility}"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        <Image Width="44" Height="44"
+                                               Source="{Binding Icon}"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               Visibility="{Binding PlaceholderVisibility}"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                            </Grid>
+                        </Border>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+            <!-- Drag feedback layer (拖拽动效): insertion line for
+                 左/右 zones, glow outline for 里面 (集中), peel chip
+                 while dragging a member out of its stack. -->
+            <!-- Hit-testable so cascade sub-cards (added in code) receive
+                 clicks/drags directly; the canvas itself has no Background
+                 so empty areas still pass through. Decorative children
+                 opt out individually. -->
+            <Canvas x:Name="DropLayer"
+                    Grid.Row="1">
+                <Rectangle x:Name="LineIndicator"
+                           Width="4"
+                           RadiusX="2" RadiusY="2"
+                           Fill="#FF0078D4"
+                           IsHitTestVisible="False"
+                           Visibility="Collapsed"/>
+                <Border x:Name="PeelChip"
+                        Background="#FF0078D4"
+                        CornerRadius="8"
+                        Padding="8,3"
+                        IsHitTestVisible="False"
+                        Visibility="Collapsed">
+                    <TextBlock Text="剥离"
+                               FontSize="11"
+                               FontWeight="Bold"
+                               Foreground="White"/>
+                </Border>
+            </Canvas>
+        </Grid>
+    </Border>
+</Window>

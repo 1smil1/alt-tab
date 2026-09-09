@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <StartupObject>WindowSwitcherWpf.App</StartupObject>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>appicon.ico</ApplicationIcon>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Page Include="App.xaml" SubType="Designer" Generator="MSBuild:Compile" />
+    <Page Include="MainWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
+    <Page Include="SwitcherOverlay.xaml" SubType="Designer" Generator="MSBuild:Compile" />
+    <Page Include="SettingsWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 便携工具: 关闭/卸载脚本随 exe 一起发布 -->
+    <None Include="Tools\关闭应用.bat" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Tools\卸载.bat" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Tools\启动窗口切换器.bat" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 轻量常驻: GC 堆软上限 128MB — GC 逼近限值时更激进回收,
+         防止长日常使用中 managed heap 无感爬升. -->
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="0x08000000" />
+  </ItemGroup>
+
+</Project>
