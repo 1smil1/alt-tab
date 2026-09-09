@@ -223,8 +223,8 @@ public partial class SwitcherOverlay : Window
 
     private bool _headerBusy; // guards SelectionChanged during programmatic fill
 
-    /// <summary>Fill the template/sort combos from config.json. Keeps the
-    /// previous selection when the lists still contain it.</summary>
+    /// <summary>Fill the template/sort combos from the settings store. Keeps
+    /// the previous selection when the lists still contain it.</summary>
     private void RefreshHeaderUI()
     {
         var cfg = _controller.Config;

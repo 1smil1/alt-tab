@@ -244,7 +244,7 @@ public partial class App : Application
         ApplyHotkeyConfig(_keyboard!);
     }
 
-    // ---------- 可配置热键 + 一次直达 (config.json → hook) ----------
+    // ---------- 可配置热键 + 一次直达 (设置存储 → hook) ----------
 
     /// <summary>Apply config Hotkey / QuickJumpModifier / SuppressAltTab to
     /// the hook. Defaults: "Alt+`" / Alt / null=自动 (Alt+Tab 热键 ⇒ 拦截).
@@ -271,46 +271,38 @@ public partial class App : Application
             $"(config={_controller.Config.SuppressAltTab?.ToString() ?? "auto"})");
     }
 
-    private System.Windows.Threading.DispatcherTimer? _quickHoldTimer;
     private IntPtr _quickTargetHwnd;
     private bool _quickOpenedStack;
 
-    /// <summary>一次直达按下: 记住目标; 若目标是堆叠头, 启动 300ms 按住
-    /// 计时 — 到点弹子标签页面 (像长按 Alt+数字进入堆叠内部).</summary>
+    /// <summary>一次直达按下: 普通窗口记住目标等松开跳转; 堆叠则**立即**
+    /// 弹子标签页面 (用户: 第一步 Alt+2 就出子标签框) — 按住 Alt 方向键
+    /// 在成员间移动, 立即松开 = 提交第一个成员.</summary>
     private void OnQuickJumpDown(int digit)
     {
         if (_controller is null || _overlay is null) return;
         _controller.PrepareQuickJump(); // 常驻态 Slotted 陈旧 — 先重建
         _quickTargetHwnd = _controller.SlotCardHwnd(digit);
-        _quickOpenedStack = false;
         if (_quickTargetHwnd == IntPtr.Zero) return;
         if (_controller.StackInfoFor(_quickTargetHwnd) is not { } st || st.Members.Count < 2)
-            return; // 普通窗口: 松开即跳, 无需计时
-        _quickHoldTimer = new System.Windows.Threading.DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(300),
-        };
-        _quickHoldTimer.Tick += (s, e) =>
-        {
-            StopQuickHoldTimer();
-            _quickOpenedStack = true;
-            Log.Info("App", $"quick hold {digit} → stack sub view '{st.Head.Title}'");
-            _overlay.ShowAndFocus();          // OpenOverlay resets to main page
-            _controller.EnterStackView(_quickTargetHwnd);
-            _overlay.TestRebuild();
-            _keyboard?.SetOverlayOpen(true);
-        };
-        _quickHoldTimer.Start();
+            return; // 普通窗口: 松开即跳
+        // 堆叠: 立即进子页面 — 之后 Alt 按住 = 方向键在成员间移动,
+        // Alt 松开 = 提交当前成员 (没动方向键 = 第一个/头), Esc = 回主页面.
+        Log.Info("App", $"quick {digit} → stack sub view '{st.Head.Title}'");
+        _overlay.ShowAndFocus();          // OpenOverlay resets to main page
+        _controller.EnterStackView(_quickTargetHwnd);
+        _overlay.TestRebuild();
+        _keyboard?.SetOverlayOpen(true);
+        _quickOpenedStack = true;
     }
 
-    /// <summary>一次直达松开: 按住已弹子页面 → 交给 Alt-up 提交; 否则
-    /// 立即跳转到目标窗口 (堆叠=跳 head).</summary>
+    /// <summary>一次直达松开: 已弹子页面 → 交给 Alt-up 提交; 否则立即
+    /// 跳转到目标窗口 (堆叠=跳 head).</summary>
     private void OnQuickJumpUp(int digit)
     {
-        StopQuickHoldTimer();
         if (_quickOpenedStack)
         {
-            _quickOpenedStack = false; // 子页面已开; Alt 松开提交所选成员
+            _quickOpenedStack = false; // 子页面已开; Alt-up 提交所选成员
+            _quickTargetHwnd = IntPtr.Zero;
             return;
         }
         if (_quickTargetHwnd != IntPtr.Zero)
@@ -318,12 +310,6 @@ public partial class App : Application
             _controller?.QuickActivate(_quickTargetHwnd);
             _quickTargetHwnd = IntPtr.Zero;
         }
-    }
-
-    private void StopQuickHoldTimer()
-    {
-        _quickHoldTimer?.Stop();
-        _quickHoldTimer = null;
     }
 
     private void OnOverlayAdvance(bool reverse) => _overlay?.Advance(reverse);
@@ -726,7 +712,7 @@ public partial class App : Application
     /// <c>WindowSwitcherWpf.exe --test-config</c>; prints PASS/FAIL lines.
     /// Exercises generic rule matching, template→pin conversion and the
     /// three-tier AssignSlots (pins &gt; smart rules &gt; MRU) — no real
-    /// config.json is touched.
+    /// settings store is touched.
     /// </summary>
     private void RunConfigTests()
     {

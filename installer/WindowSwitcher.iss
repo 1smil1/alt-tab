@@ -1,7 +1,7 @@
 ﻿; Window Switcher 标准安装包 (Inno Setup 6)
 ; 构建: installer\build-installer.cmd  (先 dotnet publish 单文件到 installer\publish\)
 #define MyAppName "alt-tab"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppExe "WindowSwitcherWpf.exe"
 
 [Setup]
@@ -11,8 +11,8 @@ AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExe}
-; 用户级安装 (无需管理员): 默认 %LOCALAPPDATA%\Programs\WindowSwitcher,
-; config.json 便携设计 (exe 同目录) 保持可写. 安装向导可自选路径.
+; 用户级安装 (无需管理员): 默认 %LOCALAPPDATA%\Programs\WindowSwitcher.
+; 安装向导可自选路径.
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\WindowSwitcher
 WizardStyle=modern

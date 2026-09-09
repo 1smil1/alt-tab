@@ -8,10 +8,11 @@ using WindowSwitcherWpf.Models;
 namespace WindowSwitcherWpf.Services;
 
 /// <summary>
-/// Exe-portable config: reads/writes config.json next to the exe
-/// (轻量化便携 — templates/sort methods travel with the exe folder).
-/// Creates an example default on first run. Chinese text is written
-/// verbatim (not \uXXXX) so the file stays hand-editable.
+/// Settings persistence backend: reads/writes config.json in
+/// %APPDATA%\WindowSwitcherWpf (与 order.json 并列). Edited exclusively
+/// through the Settings window (设置窗口) — not a hand-editable portable
+/// file. A legacy exe-adjacent config.json (v1.0 便携布局) is migrated
+/// here once, then removed. Chinese text is written verbatim (not \uXXXX).
 /// </summary>
 public sealed class ConfigStore
 {
@@ -25,12 +26,37 @@ public sealed class ConfigStore
 
     public ConfigStore()
     {
-        var dir = AppContext.BaseDirectory;
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "WindowSwitcherWpf");
         Directory.CreateDirectory(dir);
         _path = Path.Combine(dir, "config.json");
+        MigrateFromExeDir();
     }
 
     public string FilePath => _path;
+
+    /// <summary>One-time upgrade from the v1.0 exe-portable layout: with no
+    /// config.json on the APPDATA side yet, copy the exe-folder one over
+    /// (真实堆叠/热键必须原样保留), then delete the original — the exe-side
+    /// file is retired. APPDATA always wins if it already exists; a failed
+    /// delete just leaves the stale copy behind (harmless).</summary>
+    private void MigrateFromExeDir()
+    {
+        try
+        {
+            if (File.Exists(_path)) return;
+            var legacy = Path.Combine(AppContext.BaseDirectory, "config.json");
+            if (!File.Exists(legacy)) return;
+            File.Copy(legacy, _path);
+            Log.Info("Config", $"migrated legacy config.json from {legacy}");
+            File.Delete(legacy);
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("Config", ex);
+        }
+    }
 
     public ConfigFile Load()
     {
@@ -46,7 +72,7 @@ public sealed class ConfigStore
             var json = File.ReadAllText(_path);
             var cfg = JsonSerializer.Deserialize<ConfigFile>(json, JsonOptions);
             cfg ??= DefaultConfig();
-            // 旧 config.json 缺新字段时反序列化得 null (不跑属性初始化器)
+            // 旧设置文件缺新字段时反序列化得 null (不跑属性初始化器)
             // → 补默认值, 与 "文件不存在" 路径行为一致.
             var dft = DefaultConfig();
             cfg.Hotkey ??= dft.Hotkey;
@@ -74,41 +100,13 @@ public sealed class ConfigStore
         }
     }
 
-    /// <summary>First-run example: one template and two sort methods whose
-    /// names explain the semantics; user edits this file directly.</summary>
+    /// <summary>Fresh-install defaults: hotkeys only. Templates and smart
+    /// sort methods start empty — they are added via the Settings window
+    /// (示例条目是手编时代的产物; 设置窗口时代默认从零开始).</summary>
     public static ConfigFile DefaultConfig() => new()
     {
         Hotkey = "Alt+`",
         QuickJumpModifier = "Alt",
         SuppressAltTab = null,
-        Templates = new List<TemplateDefinition>
-        {
-            new()
-            {
-                Name = "示例模板",
-                Slots = new List<TemplateSlot>
-                {
-                    new() { Slot = 1, GroupKey = "C:\\example\\terminal.exe", Title = "" },
-                    new() { Slot = 2, GroupKey = "C:\\example\\browser.exe", Title = "" },
-                },
-            },
-        },
-        SortMethods = new List<SortMethodDefinition>
-        {
-            new()
-            {
-                Name = "示例-终端优先",
-                Rules = new List<SortRule>
-                {
-                    new() { Type = "process", Value = "WindowsTerminal" },
-                    new() { Type = "title", Value = "Visual Studio" },
-                },
-            },
-            new()
-            {
-                Name = "示例-浏览器优先",
-                Rules = new List<SortRule> { new() { Type = "process", Value = "chrome" } },
-            },
-        },
     };
 }

@@ -61,7 +61,7 @@
                            Margin="10,0,0,0"/>
             </StackPanel>
             <!-- Header (右上角): template picker, smart-sort picker + apply,
-                 export — all data from the exe-adjacent config.json. -->
+                 export — all data from the settings store. -->
             <StackPanel x:Name="MainHeader"
                         Grid.Row="0"
                         HorizontalAlignment="Right"
@@ -85,7 +85,7 @@
                 <ComboBox x:Name="SortCombo"
                           Width="130"
                           FontSize="12"
-                          ToolTip="智能排序方法（来自 config.json，可重复应用）"
+                          ToolTip="智能排序方法（来自设置，可重复应用）"
                           SelectionChanged="OnSortSelected"/>
                 <Button x:Name="SortApplyButton"
                         Content="应用"
@@ -99,7 +99,7 @@
                         FontSize="12"
                         Padding="8,2"
                         Margin="6,0,0,0"
-                        ToolTip="把当前槽位布局导出为模板（存入 config.json）"
+                        ToolTip="把当前槽位布局导出为模板（存入设置）"
                         Click="OnExportClick"/>
                 <Button x:Name="SettingsButton"
                         Content="⚙ 设置"

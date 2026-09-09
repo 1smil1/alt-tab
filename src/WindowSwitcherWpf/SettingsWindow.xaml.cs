@@ -31,8 +31,8 @@ public sealed class TemplateVM
 }
 
 /// <summary>
-/// 设置窗口 (按需创建, 关闭即回收 — 空闲零常驻): 三块编辑 config.json
-/// 的快捷键 / 智能排序 / 模板. 保存 = Load 最新 config → 只覆盖本窗口
+/// 设置窗口 (按需创建, 关闭即回收 — 空闲零常驻): 三块编辑设置的
+/// 快捷键 / 智能排序 / 模板. 保存 = Load 最新 config → 只覆盖本窗口
 /// 编辑的字段 → 写回 (Stacks 归 controller 独占维护, 不经这里) →
 /// onSaved 回调 (热生效 hotkey + controller.ReloadConfig).
 /// </summary>

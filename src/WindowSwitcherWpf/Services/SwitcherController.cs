@@ -38,6 +38,11 @@ public sealed class SwitcherController
     /// head card, and only surface in the stack sub view.</summary>
     public IReadOnlyList<SlotWindow> Slotted { get; private set; } = new List<SlotWindow>();
     private IntPtr _lastForeground;
+    /// <summary>枚举原始序 (EnumWindows 自顶向下 = 全局 z 序) — 与 Groups
+    /// 同一次 Refresh 的快照. "上一个窗口"/编号流补的真 MRU 语义以它为准:
+    /// 组序扁平化 (order.Groups 是拖拽持久序, 不随前台变) 会把第一 saved
+    /// 组的顶窗误当上一窗口.</summary>
+    private List<WindowEntry> _liveOrder = new();
     public int ActiveFlatIndex { get; private set; }
     public int ActiveGroupIndex { get; private set; }
     public int ActiveWindowIndex { get; private set; }
@@ -109,10 +114,10 @@ public sealed class SwitcherController
         }
     }
 
-    /// <summary>Templates and sort methods from config.json (右上角 UI 的数据源).</summary>
+    /// <summary>Templates and sort methods from the settings store (右上角 UI 的数据源).</summary>
     public ConfigFile Config => _config;
 
-    /// <summary>设置窗口保存后重载 config.json — 模板/排序下拉与热键字段
+    /// <summary>设置窗口保存后重载设置存储 — 模板/排序下拉与热键字段
     /// 即时生效. Stacks 归 controller 独占维护, Load 拿回的就是最新.</summary>
     public void ReloadConfig()
     {
@@ -146,7 +151,17 @@ public sealed class SwitcherController
 
     private void RebuildFlat(IntPtr foreground)
     {
-        var mru = Groups.SelectMany(g => g.Windows).ToList();
+        // 真 MRU 序 = 全局 z 序 (枚举原始序, 与 Groups 同一次 Refresh 的
+        // 快照), 不是组序扁平化 — order.Groups 是拖拽固定的持久顺序, 不
+        // 随前台变; 按组扁平会让 slot0 恒为第一 saved 组的顶窗, 而 "上一
+        // 个窗口" (用户: 微信切走后 0 号必须是微信) 是 z 序里 fg 之下的
+        // 第一个. 网格按 Slotted (slot 序) 渲染, 组序只活在组视图/持久化.
+        var flat = Groups.SelectMany(g => g.Windows).ToList();
+        var liveHwnds = new HashSet<IntPtr>(flat.Select(w => w.Hwnd));
+        var mru = _liveOrder.Where(w => liveHwnds.Contains(w.Hwnd)).ToList();
+        if (mru.Count != flat.Count)
+            foreach (var w in flat.Where(w => mru.All(m => m.Hwnd != w.Hwnd)))
+                mru.Add(w); // 快照缺员兜底 (理论不发生 — 同一次枚举)
         var idx = mru.FindIndex(w => w.Hwnd == foreground);
         if (idx > 0)
         {
@@ -154,6 +169,9 @@ public sealed class SwitcherController
             mru.RemoveAt(idx);
             mru.Add(entry);
         }
+        // fg 已停到队尾 — 快照完整 MRU (含随后会被抽出的堆叠 tail),
+        // 供下方 slot0/-2 的堆叠成员可见性补丁使用.
+        var fullMru = mru.ToList();
 
         // Stack collapse (集中): resolve every configured stack against the
         // alive windows; the head (first alive member) keeps its place in
@@ -201,6 +219,36 @@ public sealed class SwitcherController
         }
 
         var cards = AssignSlots(mru, _order.Pins, _activeSortRules, foreground);
+        // Slot 0/-2 的堆叠成员可见性 (用户: 上次用的是固定 2 标签的第二个
+        // 子标签, 0 号就出现这一个标签的纯单卡, 不呈堆叠形式 — 折叠形态
+        // 永远留在它的固定编号上): tail 成员已从 mru 抽出 (编号区永不见
+        // 成员), 但 "最近用过" 的语义里 tail 要参战 — 上一个窗口或当前
+        // 窗口是 tail 时把它补回 mru 对应位置再算一次 AssignSlots.
+        // 0 号/复制卡是纯单卡: tail 不是 head, StackInfoFor 不命中, 天然无级联.
+        bool IsAliveStackTail(WindowEntry w) => _stacksByHead.Values.Any(s =>
+            s.Head.Hwnd != w.Hwnd && s.Members.Any(m => m.Hwnd == w.Hwnd));
+        var patched = mru;
+        var changed = false;
+        if (fullMru.FirstOrDefault(w => w.Hwnd != foreground) is { } prev
+            && IsAliveStackTail(prev))
+        {
+            var tmp = new List<WindowEntry>(patched.Count + 1) { prev };
+            tmp.AddRange(patched);
+            patched = tmp; // 上一个窗口 = tail → 补回队首 (0 号 = 它的纯单卡)
+            changed = true;
+        }
+        if (foreground != default
+            && fullMru.Find(w => w.Hwnd == foreground) is { } fgEntry
+            && IsAliveStackTail(fgEntry))
+        {
+            patched = new List<WindowEntry>(patched) { fgEntry }; // 停队尾 → -2 复制卡
+            changed = true;
+        }
+        if (changed)
+            cards = AssignSlots(patched, _order.Pins, _activeSortRules, foreground);
+        // tail 只允许出现在 0 号/-2 复制位 — 补回 mru 后若被编号区流补
+        // 认领 (fg 停队尾会被 rest 收进去) 必须剔除, 堆叠成员永不占号.
+        cards.RemoveAll(c => c.Slot >= 1 && IsAliveStackTail(c.Entry));
         // 当前窗口卡 (Slot=-2 复制卡) 与 Slot 0 (上一个窗口) 由 AssignSlots
         // 统一插入 — 复制卡不参与数字寻址/导出/拖拽/cascade (SelectByDigit /
         // ExportCurrentAsTemplate / CanDrag 各自跳过), Slot 0 卡不可拖拽.
@@ -403,7 +451,7 @@ public sealed class SwitcherController
 
     /// <summary>Generic structural matching (通用过滤): process name contains,
     /// module path contains, title contains, or exact group key. No
-    /// app-specific logic lives in code — only in the user's config.json.</summary>
+    /// app-specific logic lives in code — only in the user's settings.</summary>
     public static bool RuleMatches(WindowEntry w, SortRule r) => r.Type switch
     {
         "process" => w.ProcessName.Contains(r.Value, StringComparison.OrdinalIgnoreCase),
@@ -795,7 +843,7 @@ public sealed class SwitcherController
     }
 
     /// <summary>导出: snapshot the current slot layout (slots 1..10) into
-    /// config.json as a new template. Same-name templates are replaced.</summary>
+    /// the settings store as a new template. Same-name templates are replaced.</summary>
     public int ExportCurrentAsTemplate(string name)
     {
         var slots = new List<TemplateSlot>();
@@ -1138,6 +1186,7 @@ public sealed class SwitcherController
         try
         {
             var live = _enumerator.Enumerate(onlyCurrentDesktop: true);
+            _liveOrder = live.ToList();
             var grouped = _grouping.Group(live, _order);
             Groups = grouped;
             if (ActiveGroupIndex >= Groups.Count) ActiveGroupIndex = 0;

@@ -4,9 +4,10 @@ using System.Collections.Generic;
 namespace WindowSwitcherWpf.Models;
 
 /// <summary>
-/// Exe-adjacent <c>config.json</c>: all templates and smart-sort methods in
-/// ONE file (用一个json维护所有模板和智能排序). Data lives here — the
-/// matching engine stays generic/structural (通用过滤), never app-specific.
+/// Settings store <c>config.json</c> in %APPDATA%\WindowSwitcherWpf:
+/// all templates and smart-sort methods in ONE file (用一个json维护所有模板
+/// 和智能排序). Data lives here — the matching engine stays
+/// generic/structural (通用过滤), never app-specific.
 /// </summary>
 public sealed class ConfigFile
 {

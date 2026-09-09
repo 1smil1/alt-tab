@@ -3,7 +3,7 @@ using System;
 namespace WindowSwitcherWpf.Services;
 
 /// <summary>
-/// Parses the config.json hotkey strings ("Alt+`", "Alt+Tab",
+/// Parses the settings hotkey strings ("Alt+`", "Alt+Tab",
 /// "Ctrl+Shift+F5", …) into Win32 virtual-key codes. v1 hook model:
 /// the overlay trigger must include Alt (Alt-up = commit), so the
 /// modifier part is validated but only the KEY drives registration.
