@@ -20,5 +20,5 @@ echo === Inno Setup compile ===
 %ISCC% "%~dp0WindowSwitcher.iss"
 if errorlevel 1 exit /b 1
 
-echo === DONE: %~dp0Output\alt-tab-setup-1.0.0.exe ===
+echo === DONE: see %~dp0Output (version = .iss MyAppVersion) ===
 endlocal
