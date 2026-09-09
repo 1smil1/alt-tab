@@ -540,9 +540,12 @@ public partial class SwitcherOverlay : Window
             _windows[i].IsSelected = false;
         if (_controller.Nav.Count == 0) return;
         var entry = _controller.Nav[Math.Min(_controller.ActiveFlatIndex, _controller.Nav.Count - 1)];
+        // 复制卡 (-2) 与真卡同 hwnd: 蓝框只画在真卡上, 复制卡永不显示
+        // 选中外框 (用户: 复制的时候不要复制外框).
         for (var i = 0; i < _windows.Count; i++)
         {
-            if (_windows[i].Hwnd == entry.Hwnd) { _windows[i].IsSelected = true; break; }
+            if (_windows[i].Hwnd == entry.Hwnd && !_windows[i].IsCurrentCopy)
+            { _windows[i].IsSelected = true; break; }
         }
         ScrollSelectionIntoView();
     }

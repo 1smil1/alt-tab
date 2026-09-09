@@ -121,8 +121,28 @@
                     </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
+                        <!-- 选中蓝框与 pin 黄框同显且不重叠: 蓝框画在 Card
+                             外围的 SelectionRing 上 (未选中 = 透明 4px padding,
+                             占位恒定, 选中 = thickness 0→4, padding+thickness
+                             恒为 4 → Card 位置分毫不动); 黄框仍是 Card 自己
+                             的 border (IsPinned trigger). -->
+                        <Border x:Name="SelectionRing"
+                                Margin="2"
+                                Padding="4"
+                                CornerRadius="12">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="BorderBrush" Value="Transparent"/>
+                                    <Setter Property="BorderThickness" Value="0"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                            <Setter Property="BorderBrush" Value="#FF0078D4"/>
+                                            <Setter Property="BorderThickness" Value="4"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
                         <Border x:Name="Card"
-                                Margin="6"
                                 CornerRadius="8"
                                 Cursor="Hand"
                                 MouseLeftButtonDown="OnCardMouseDown"
@@ -133,9 +153,9 @@
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <!-- BorderBrush/Thickness live here (not on
-                                         the element) so the selection trigger
-                                         can actually override them — local
-                                         values always beat style triggers. -->
+                                         the element) so the pin trigger can
+                                         actually override them — local values
+                                         always beat style triggers. -->
                                     <Setter Property="BorderBrush" Value="#1A000000"/>
                                     <Setter Property="BorderThickness" Value="1"/>
                                     <Setter Property="Background" Value="#FFFFFFFF"/>
@@ -143,13 +163,7 @@
                                         <Trigger Property="IsMouseOver" Value="True">
                                             <Setter Property="Background" Value="#EAF3FF"/>
                                         </Trigger>
-                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                            <Setter Property="BorderBrush" Value="#FF0078D4"/>
-                                            <Setter Property="BorderThickness" Value="4"/>
-                                        </DataTrigger>
-                                        <!-- 固定 = permanent pin-colored frame (last
-                                             trigger wins: pinned stays visible even
-                                             while selected, just thicker). -->
+                                        <!-- 固定 = permanent pin-colored frame. -->
                                         <DataTrigger Binding="{Binding IsPinned}" Value="True">
                                             <Setter Property="BorderBrush" Value="#FFD97706"/>
                                             <Setter Property="BorderThickness" Value="4"/>
@@ -297,6 +311,7 @@
                                 </Border>
                             </StackPanel>
                             </Grid>
+                        </Border>
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
