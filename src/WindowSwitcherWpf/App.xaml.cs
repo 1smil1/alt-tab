@@ -571,6 +571,30 @@ public partial class App : Application
             }),
             "pins 5,6: x keeps 7; 6-left-of-5 rejected; 4-left-of-5 allowed");
 
+        // 14. Slot-0 复制机制 (用户: 标签3 固定则一直存在, 除非它没有固定):
+        //     上一窗口 (MRU 首位) 是 pin@3 的 c 时 — 0 号显示副本与 3 号
+        //     真身并存, 同 hwnd; 副本不带 pin 框, 真身 IsPinned.
+        var mru14 = new[] { "c", "a", "b" }.Select(W).ToList();
+        var pins14 = new List<PinDefinition> { new("group:c", "c", 3) };
+        var s14 = SwitcherController.AssignSlots(mru14, pins14);
+        var copy14 = s14.FirstOrDefault(x => x.IsSlot0Copy);
+        var real14 = s14.FirstOrDefault(x => x.Entry.Title == "c" && !x.IsSlot0Copy);
+        Check("slot0-copy-pin-coexist",
+            s14.Count == 4
+            && copy14 is { Slot: 0, IsPinned: false, IsCurrentCopy: false }
+            && copy14!.Entry.Title == "c"
+            && real14 is { Slot: 3, IsPinned: true }
+            && copy14!.Entry.Hwnd == real14!.Entry.Hwnd,
+            string.Join(',', s14.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}{(x.IsSlot0Copy ? "^" : "")}")));
+
+        // 15. 对照: 未固定的上一窗口没有复制 — 单卡 slot 0, 无真身.
+        var s15 = SwitcherController.AssignSlots(
+            new[] { "c", "a", "b" }.Select(W).ToList(), new List<PinDefinition>());
+        Check("slot0-unpinned-no-copy",
+            s15.Count == 3 && s15[0].Slot == 0 && !s15[0].IsSlot0Copy
+            && s15.Count(x => x.Entry.Title == "c") == 1,
+            string.Join(',', s15.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsSlot0Copy ? "^" : "")}")));
+
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
     }

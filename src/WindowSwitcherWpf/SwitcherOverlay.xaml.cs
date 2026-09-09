@@ -348,6 +348,7 @@ public partial class SwitcherOverlay : Window
                     SlotBadge = sw.Slot >= 0 ? sw.Slot.ToString() : "",
                     IsPinned = sw.IsPinned,
                     IsCurrentCopy = sw.IsCurrentCopy,
+                    IsSlot0Copy = sw.IsSlot0Copy,
                 };
                 var st = _controller.StackInfoFor(sw.Entry.Hwnd);
                 if (st is not null) ow.StackCount = st.Members.Count;
@@ -374,7 +375,7 @@ public partial class SwitcherOverlay : Window
         // before the rects are measured (FIFO at the same priority).
         if (_isOpen)
         {
-            var desired = new HashSet<(IntPtr, bool)>(_windows.Select(w => (w.Hwnd, w.IsCurrentCopy)));
+            var desired = new HashSet<(IntPtr, bool)>(_windows.Select(w => (w.Hwnd, w.IsCardCopy)));
             if (!_controller.IsInStackView)
                 foreach (var w in _windows)
                     if (_controller.StackInfoFor(w.Hwnd) is { } st2)
@@ -884,7 +885,7 @@ public partial class SwitcherOverlay : Window
         }
 
         foreach (var w in _windows)
-            Register(w.Hwnd, w, w.IsCurrentCopy);
+            Register(w.Hwnd, w, w.IsCardCopy);
         // Cascade members show half-previews on the head card in the main
         // view — they need registrations even without a card of their own.
         if (!_controller.IsInStackView)
@@ -981,13 +982,15 @@ public partial class SwitcherOverlay : Window
             {
                 // Stack heads render their members as a left→right cascade
                 // (从左往右叠一半); every member gets a clipped rect there.
-                if (!_controller.IsInStackView
+                // 复制卡 (-2/0号副本) 不是 cascade 头 — 真身卡 (排在后面)
+                // 用自己的几何锚定成员缩略图, 否则 rect 全错位.
+                if (!_controller.IsInStackView && !w.IsCardCopy
                     && _controller.StackInfoFor(w.Hwnd) is { } st && st.Members.Count >= 2)
                 {
                     UpdateCascadeRects(w, st, origin, cascadeDone);
                     continue;
                 }
-                if (!_liveThumbs.TryGetValue((w.Hwnd, w.IsCurrentCopy), out var id)) continue;
+                if (!_liveThumbs.TryGetValue((w.Hwnd, w.IsCardCopy), out var id)) continue;
                 var el = FindThumbBorder(w);
                 if (el is null || !el.IsLoaded) continue;
                 var tl = el.PointToScreen(new Point(0, 0));
@@ -1146,7 +1149,7 @@ public partial class SwitcherOverlay : Window
             var seenHeads = new HashSet<IntPtr>();
             foreach (var ow in _windows)
             {
-                if (ow.IsCurrentCopy) continue; // 复制卡不承载 cascade
+                if (ow.IsCardCopy) continue; // 复制卡 (-2 与 0号副本) 不承载 cascade — 真身卡承载
                 if (_controller.StackInfoFor(ow.Hwnd) is not { } st
                     || st.Members.Count < 2) continue;
                 if (!seenHeads.Add(ow.Hwnd))
@@ -1229,7 +1232,7 @@ public partial class SwitcherOverlay : Window
         var marginDirty = false;
         foreach (var ow in _windows)
         {
-            if (ow.IsCurrentCopy) continue; // 复制卡是纯展示卡 — 无overhang/工具/子卡
+            if (ow.IsCardCopy) continue; // 复制卡 (-2 与 0号副本) 是纯展示卡 — 无overhang/工具/子卡
             if (WindowsList.ItemContainerGenerator.ContainerFromItem(ow)
                 is not ContentPresenter cp) continue;
             var st = _controller.StackInfoFor(ow.Hwnd);
@@ -2448,6 +2451,14 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     /// <summary>当前窗口的复制卡 (Windows Alt+Tab 左起第一张): 纯展示 —
     /// 不可拖/不承载 cascade/不被数字寻址; badge 显示真实编号.</summary>
     public bool IsCurrentCopy { get; init; }
+    /// <summary>上一窗口 (Slot=0) 本身是 pin 卡时的显示副本 — 真身保留在
+    /// 编号区 (固定=一直存在). 可被选中/点击 (quick tap 提交目标), 但不
+    /// 承载 cascade、缩略图注册走副本 key 位.</summary>
+    public bool IsSlot0Copy { get; init; }
+    /// <summary>缩略图注册/cascade 头判定的"副本"位: 同 hwnd 双卡 (副本 +
+    /// 真身) 靠它拿两个独立的 DWM 注册 — (hwnd, true)=副本, (hwnd, false)
+    /// =真身.</summary>
+    public bool IsCardCopy => IsCurrentCopy || IsSlot0Copy;
     private bool _isSelected;
     public bool IsSelected
     {

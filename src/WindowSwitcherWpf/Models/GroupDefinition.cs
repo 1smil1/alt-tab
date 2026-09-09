@@ -79,6 +79,9 @@ public sealed class PinDefinition
 /// IsCurrentCopy = 当前窗口卡 (Windows Alt+Tab 左起第一张 = 你刚离开的
 /// 窗口): 恒占 index 0, Slot=-2 → 无数字 badge. 纯展示卡 — 不参与数字
 /// 寻址/导出/拖拽/cascade. fg 同时是 pin 卡时双卡并存: 真实卡留在编号区
-/// (Alt+数字 直达它 = 激活当前窗口, 无害)。</summary>
+/// (Alt+数字 直达它 = 激活当前窗口, 无害)。
+/// IsSlot0Copy = 上一窗口 (Slot=0) 本身是 pin 卡时的显示副本 (用户: 标签3
+/// 固定则一直存在, 除非它没有固定): 真身留在编号区由 pin 认领, 0 号只是
+/// 展示. 未固定的上一窗口没有真身卡 — 该卡是唯一卡, 标志保持 false.</summary>
 public sealed record SlotWindow(WindowEntry Entry, int Slot, bool IsPinned,
-    bool IsCurrentCopy = false);
+    bool IsCurrentCopy = false, bool IsSlot0Copy = false);

@@ -207,8 +207,9 @@ public sealed class SwitcherController
         _flat = Slotted.Select(s => s.Entry).ToList();
         // Diagnostics: duplicate hwnds in the flat list break the cascade
         // build (two head cards share one stack → orphaned sub cards).
-        // 当前窗口复制卡与它的真实卡同 hwnd 是设计内的双卡 — 不算 dup.
-        var dupGroups = Slotted.Where(s => !s.IsCurrentCopy)
+        // 当前窗口复制卡 (-2) 与 slot0 显示副本 (0号是 pin 卡时) 与真卡
+        // 同 hwnd 均为设计内的双卡 — 不算 dup.
+        var dupGroups = Slotted.Where(s => !s.IsCurrentCopy && !s.IsSlot0Copy)
             .GroupBy(w => w.Entry.Hwnd).Where(g => g.Count() > 1).ToList();
         foreach (var g in dupGroups)
             WindowSwitcherWpf.Services.Log.Info("Controller",
@@ -333,11 +334,18 @@ public sealed class SwitcherController
             if (i != fi) { slot0 = i; break; }
         if (slot0 < 0) return result; // 屏幕上只有 fg 一个窗口
 
-        result.Add(new SlotWindow(mru[slot0], 0, false));
+        // 上一窗口本身是 pin 卡时走复制机制 (用户: 标签3 固定则一直存在,
+        // 除非它没有固定) — 0 号是显示副本, 真身留在编号区由 pin 认领,
+        // 同 -2 的双卡并存. 未固定的上一窗口没有真身卡, 不算复制.
+        var slot0Entry = mru[slot0];
+        var slot0Pinned = pins.Any(p => p.MemberTitle is null
+            && p.GroupKey == slot0Entry.GroupKey && p.Title == slot0Entry.Title);
+        result.Add(new SlotWindow(slot0Entry, 0, false) { IsSlot0Copy = slot0Pinned });
         // 编号区候选 = mru 除 slot0 卡外的全部 (含 fg 真实卡 — pin 认领
-        // 依赖它, 双卡并存的关键). 不可拖拽: -2 复制卡 CanDrag 拒绝,
-        // Slot 0 卡 MoveRelative 拒绝.
-        var rest = mru.Where((w, i) => i != slot0).ToList();
+        // 依赖它, 双卡并存的关键); slot0 窗口已 pin 时同样留在候选里
+        // (真身). 不可拖拽: -2 复制卡 CanDrag 拒绝, Slot 0 卡 MoveRelative
+        // 拒绝.
+        var rest = mru.Where((w, i) => i != slot0 || slot0Pinned).ToList();
 
         // 1. Pins hard-claim their numbers (模板/手动固定 tier — both are pins;
         // smart sort NEVER moves them).
@@ -409,7 +417,10 @@ public sealed class SwitcherController
     /// flow again. Persisted to order.json.</summary>
     public void TogglePin(IntPtr hwnd)
     {
-        var sw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd);
+        // 同 hwnd 双卡 (复制机制): 优先取真身卡 — 0 号副本排在列表前部,
+        // 否则点真身卡的 📌 会被下面的 Slot==0 挡掉 (unpin 失效).
+        var sw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd && !s.IsSlot0Copy)
+              ?? Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd);
         if (sw is null || sw.Slot == 0) return;
         var pin = _order.Pins.FirstOrDefault(p =>
             p.MemberTitle is null
@@ -453,7 +464,8 @@ public sealed class SwitcherController
     }
 
     public bool IsStackPinned(IntPtr headHwnd) =>
-        Slotted.FirstOrDefault(s => s.Entry.Hwnd == headHwnd) is { IsPinned: true };
+        // 同 hwnd 双卡: 只有真身卡带 IsPinned (0 号副本恒 false) — Any 即真身.
+        Slotted.Any(s => s.Entry.Hwnd == headHwnd && s.IsPinned);
 
     // ---------- Stack-member pins (子标签固定; 固定成员联动主标签) ----------
     // Constraint from the spec: 主标签只有固定了，子标签才能固定; pinning
@@ -880,7 +892,7 @@ public sealed class SwitcherController
         for (var i = 0; i < Slotted.Count; i++)
         {
             var sw = Slotted[i];
-            yield return $"i={i} copy={sw.IsCurrentCopy} slot={sw.Slot} " +
+            yield return $"i={i} copy={sw.IsCurrentCopy} s0={sw.IsSlot0Copy} slot={sw.Slot} " +
                 $"pin={sw.IsPinned} hwnd=0x{sw.Entry.Hwnd.ToInt64():X} " +
                 $"'{sw.Entry.Title}'";
         }
