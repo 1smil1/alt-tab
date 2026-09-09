@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading;
 using System.Windows;
+using System.Windows.Interop;
 using WindowSwitcherWpf.Interop;
 using WindowSwitcherWpf.Models;
 using WindowSwitcherWpf.Services;
@@ -19,6 +20,7 @@ public partial class App : Application
     private SwitcherController? _controller;
     private SwitcherOverlay? _overlay;
     private MainWindow? _host;
+    private TrayIconService? _tray;
 
     static App()
     {
@@ -185,8 +187,18 @@ public partial class App : Application
 
         _overlay!.SettingsRequested += OnSettingsRequested;
 
-        // 轻量化: no tray icon, no taskbar presence — the resident exe IS
-        // the app. Close it with 关闭应用.bat, remove it with 卸载.bat.
+        // 托盘图标: 挂在隐藏宿主 HWND 上 (可见性来源), 同进程一个 HICON,
+        // 无新增进程/内存负担. 左键=设置, 右键=设置/显示切换面板/退出.
+        var hostHwnd = new WindowInteropHelper(_host).EnsureHandle();
+        _tray = new TrayIconService(hostHwnd,
+            OnSettingsRequested,
+            () =>
+            {
+                _overlay?.ShowAndFocus();
+                _keyboard?.SetOverlayOpen(true);
+            },
+            () => Shutdown());
+        HwndSource.FromHwnd(hostHwnd)!.AddHook(_tray.WndProc);
     }
 
     private void OnOverlayRequested()
@@ -817,6 +829,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _tray?.Dispose();
         _keyboard?.Dispose();
         SingleInstanceMutex?.ReleaseMutex();
         SingleInstanceMutex?.Dispose();
