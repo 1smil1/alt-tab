@@ -277,15 +277,14 @@
                                         BorderBrush="#22000000"
                                         BorderThickness="1"
                                         Margin="7,0,7,7"
-                                        Height="150"
+                                        Height="200"
                                         Width="{Binding ThumbWidth}"
                                         ClipToBounds="True">
                                     <Grid>
                                         <Image x:Name="ThumbImage"
                                                Source="{Binding Thumbnail}"
-                                               Height="150"
-                                               Stretch="Uniform"
-                                               HorizontalAlignment="Left"
+                                               Height="200"
+                                               Stretch="UniformToFill"
                                                Visibility="{Binding ThumbVisibility}"
                                                RenderOptions.BitmapScalingMode="HighQuality"/>
                                         <Image Width="44" Height="44"

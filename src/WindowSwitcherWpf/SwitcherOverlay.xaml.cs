@@ -34,9 +34,10 @@ public partial class SwitcherOverlay : Window
         DataContext = this;
         WindowsList.ItemsSource = _windows;
 
-        // Native Alt+Tab panel nearly fills the screen center; content
-        // beyond these caps scrolls (draggable scrollbar on the right).
-        MaxWidth = SystemParameters.WorkArea.Width * 0.94;
+        // Match the native Alt+Tab switcher width: measured 2140px on a
+        // 2560px work area (factor 0.836). Content beyond these caps
+        // scrolls (draggable scrollbar on the right).
+        MaxWidth = SystemParameters.WorkArea.Width * 0.836;
         MaxHeight = SystemParameters.WorkArea.Height * 0.92;
 
         // Any movement of the window or its viewport changes the
@@ -373,12 +374,12 @@ public partial class SwitcherOverlay : Window
         // before the rects are measured (FIFO at the same priority).
         if (_isOpen)
         {
-            var desired = new HashSet<IntPtr>(_windows.Select(w => w.Hwnd));
+            var desired = new HashSet<(IntPtr, bool)>(_windows.Select(w => (w.Hwnd, w.IsCurrentCopy)));
             if (!_controller.IsInStackView)
                 foreach (var w in _windows)
                     if (_controller.StackInfoFor(w.Hwnd) is { } st2)
                         foreach (var m in st2.Members)
-                            desired.Add(m.Hwnd);
+                            desired.Add((m.Hwnd, false));
             Dispatcher.BeginInvoke(new Action(BuildCascades), DispatcherPriority.Loaded);
             if (!_liveThumbs.Keys.ToHashSet().SetEquals(desired))
                 Dispatcher.BeginInvoke(new Action(RegisterLiveThumbnails), DispatcherPriority.Loaded);
@@ -683,8 +684,9 @@ public partial class SwitcherOverlay : Window
 
             // Cap the panel to the cursor monitor (MaxWidth/MaxHeight from
             // the constructor follow the PRIMARY monitor only), then force
-            // layout so the window resizes to the new cap.
-            MaxWidth = workW * 0.94;
+            // layout so the window resizes to the new cap. 0.836 = native
+            // Alt+Tab switcher width (2140px @ 2560px work area).
+            MaxWidth = workW * 0.836;
             MaxHeight = workH * 0.92;
             InvalidateMeasure();
             Measure(new Size(MaxWidth, MaxHeight));
@@ -716,7 +718,9 @@ public partial class SwitcherOverlay : Window
     // same mechanism native Alt+Tab uses — so minimized and occluded
     // windows still show real content with zero capture cost.
 
-    private readonly Dictionary<IntPtr, IntPtr> _liveThumbs = new();
+    // Key = (hwnd, isCurrentCopy): 当前窗口卡与真实卡同 hwnd 双卡并存,
+    // DWM 允许同一 source 注册多个 thumbnail — 各自独立 dest rect.
+    private readonly Dictionary<(IntPtr Hwnd, bool Copy), IntPtr> _liveThumbs = new();
 
     // A minimized window's DWM surface is its tiny minimized frame, so a
     // live thumbnail shows a miniature window instead of content. Fix:
@@ -850,9 +854,9 @@ public partial class SwitcherOverlay : Window
         UnregisterLiveThumbnails();
         if (PresentationSource.FromVisual(this) is not HwndSource src) return;
 
-        void Register(IntPtr hwnd, OverlayWindow? vm)
+        void Register(IntPtr hwnd, OverlayWindow? vm, bool copy = false)
         {
-            if (_liveThumbs.ContainsKey(hwnd)) return;
+            if (_liveThumbs.ContainsKey((hwnd, copy))) return;
             try
             {
                 var hr = NativeMethods.DwmRegisterThumbnail(src.Handle, hwnd, out var id);
@@ -862,7 +866,7 @@ public partial class SwitcherOverlay : Window
                         $"dwm register failed hr=0x{hr:X} hwnd=0x{hwnd.ToInt64():X}");
                     return;
                 }
-                _liveThumbs[hwnd] = id;
+                _liveThumbs[(hwnd, copy)] = id;
                 // Never-danced minimized windows would show their tiny
                 // minimized frame; keep the static/placeholder card up
                 // until the dance upgrades the surface (~1s).
@@ -877,7 +881,7 @@ public partial class SwitcherOverlay : Window
         }
 
         foreach (var w in _windows)
-            Register(w.Hwnd, w);
+            Register(w.Hwnd, w, w.IsCurrentCopy);
         // Cascade members show half-previews on the head card in the main
         // view — they need registrations even without a card of their own.
         if (!_controller.IsInStackView)
@@ -904,6 +908,62 @@ public partial class SwitcherOverlay : Window
         foreach (var w in _windows) w.HasLivePreview = false;
     }
 
+    /// <summary>Source window's client size for thumbnail source-rect math.
+    /// A minimized window's client rect degenerates to 0x0 — fall back to
+    /// the danced surface's RESTORED size from rcNormalPosition.</summary>
+    private static NativeMethods.RECT ClientRectFor(IntPtr hwnd)
+    {
+        NativeMethods.GetClientRect(hwnd, out var crc);
+        if (crc.Right - crc.Left >= 50 && crc.Bottom - crc.Top >= 50)
+            return crc;
+        var wp = new NativeMethods.WINDOWPLACEMENT
+        {
+            length = (uint)System.Runtime.InteropServices.Marshal
+                .SizeOf<NativeMethods.WINDOWPLACEMENT>(),
+        };
+        if (NativeMethods.GetWindowPlacement(hwnd, ref wp))
+        {
+            var nr = wp.rcNormalPosition;
+            crc = new NativeMethods.RECT
+            {
+                Left = 0,
+                Top = 0,
+                Right = nr.Right - nr.Left,
+                Bottom = nr.Bottom - nr.Top,
+            };
+        }
+        return crc;
+    }
+
+    /// <summary>Centered client-area sub-rect whose aspect matches the dest
+    /// rect. DWM stretches source→dest, so without this a taller dest than
+    /// the window aspect would distort the preview; with it the preview
+    /// crops like the native Alt+Tab switcher instead.</summary>
+    private static NativeMethods.RECT CropSourceFor(IntPtr hwnd, double destW, double destH)
+    {
+        var src = new NativeMethods.RECT { Left = 0, Top = 0 };
+        var crc = ClientRectFor(hwnd);
+        var cw = crc.Right - crc.Left;
+        var ch = crc.Bottom - crc.Top;
+        src.Right = cw;
+        src.Bottom = ch;
+        if (cw < 50 || ch < 50 || destW <= 0 || destH <= 0) return src;
+        var target = destW / destH;
+        if (cw / (double)ch > target)
+        {
+            var sw = ch * target;
+            src.Left = (int)((cw - sw) / 2);
+            src.Right = (int)((cw + sw) / 2);
+        }
+        else
+        {
+            var sh = cw / target;
+            src.Top = (int)((ch - sh) / 2);
+            src.Bottom = (int)((ch + sh) / 2);
+        }
+        return src;
+    }
+
     private void UpdateLiveRects()
     {
         if (_liveThumbs.Count == 0) return;
@@ -921,7 +981,7 @@ public partial class SwitcherOverlay : Window
                     UpdateCascadeRects(w, st, origin, cascadeDone);
                     continue;
                 }
-                if (!_liveThumbs.TryGetValue(w.Hwnd, out var id)) continue;
+                if (!_liveThumbs.TryGetValue((w.Hwnd, w.IsCurrentCopy), out var id)) continue;
                 var el = FindThumbBorder(w);
                 if (el is null || !el.IsLoaded) continue;
                 var tl = el.PointToScreen(new Point(0, 0));
@@ -929,20 +989,22 @@ public partial class SwitcherOverlay : Window
                 // DIPs — convert the size too, or thumbnails render at
                 // 1/scale of the card on >100% monitors.
                 var br = el.PointToScreen(new Point(el.ActualWidth, el.ActualHeight));
-                var left = (int)(tl.X - origin.X);
-                var top = (int)(tl.Y - origin.Y);
+                var destW = (int)(br.X - tl.X);
+                var destH = (int)(br.Y - tl.Y);
                 var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
                 {
                     dwFlags = NativeMethods.DWM_TNP_RECTDESTINATION
                               | NativeMethods.DWM_TNP_VISIBLE
-                              | NativeMethods.DWM_TNP_SOURCECLIENTAREA,
+                              | NativeMethods.DWM_TNP_SOURCECLIENTAREA
+                              | NativeMethods.DWM_TNP_RECTSOURCE,
                     rcDestination = new NativeMethods.RECT
                     {
-                        Left = left,
-                        Top = top,
-                        Right = left + (int)(br.X - tl.X),
-                        Bottom = top + (int)(br.Y - tl.Y),
+                        Left = (int)(tl.X - origin.X),
+                        Top = (int)(tl.Y - origin.Y),
+                        Right = (int)(tl.X - origin.X) + destW,
+                        Bottom = (int)(tl.Y - origin.Y) + destH,
                     },
+                    rcSource = CropSourceFor(w.Hwnd, destW, destH),
                     fVisible = true,
                     fSourceClientAreaOnly = true,
                     opacity = 255,
@@ -977,7 +1039,7 @@ public partial class SwitcherOverlay : Window
         {
             var m = st.Members[i];
             done.Add(m.Hwnd);
-            if (!_liveThumbs.TryGetValue(m.Hwnd, out var id)) continue;
+            if (!_liveThumbs.TryGetValue((m.Hwnd, false), out var id)) continue;
             var el = i == 0 ? headEl
                 : _cascadeSubs.TryGetValue(m.Hwnd, out var t) ? t : null;
             if (el is null || !el.IsLoaded) continue;
@@ -1011,8 +1073,10 @@ public partial class SwitcherOverlay : Window
             };
             if (last)
             {
-                flags |= NativeMethods.DWM_TNP_SOURCECLIENTAREA;
+                flags |= NativeMethods.DWM_TNP_SOURCECLIENTAREA
+                       | NativeMethods.DWM_TNP_RECTSOURCE;
                 props.fSourceClientAreaOnly = true;
+                props.rcSource = CropSourceFor(m.Hwnd, visW, thumbHeight);
             }
             else
             {
@@ -1022,35 +1086,12 @@ public partial class SwitcherOverlay : Window
                 flags |= NativeMethods.DWM_TNP_RECTSOURCE
                        | NativeMethods.DWM_TNP_SOURCECLIENTAREA;
                 props.fSourceClientAreaOnly = true;
-                NativeMethods.GetClientRect(m.Hwnd, out var crc);
-                if (crc.Right - crc.Left < 50 || crc.Bottom - crc.Top < 50)
-                {
-                    // Minimized: the client rect degenerates to 0x0, and an
-                    // empty rcSource makes DWM paint nothing (blank peek).
-                    // The danced surface keeps its RESTORED size, whose
-                    // dimensions live in rcNormalPosition even while iconic.
-                    var wp = new NativeMethods.WINDOWPLACEMENT
-                    {
-                        length = (uint)System.Runtime.InteropServices.Marshal
-                            .SizeOf<NativeMethods.WINDOWPLACEMENT>(),
-                    };
-                    if (NativeMethods.GetWindowPlacement(m.Hwnd, ref wp))
-                    {
-                        var nr = wp.rcNormalPosition;
-                        crc = new NativeMethods.RECT
-                        {
-                            Left = 0,
-                            Top = 0,
-                            Right = nr.Right - nr.Left,
-                            Bottom = nr.Bottom - nr.Top,
-                        };
-                    }
-                }
+                var crc = ClientRectFor(m.Hwnd);
                 props.rcSource = new NativeMethods.RECT
                 {
                     Left = 0,
                     Top = 0,
-                    Right = (int)((crc.Right - crc.Left) / 2),
+                    Right = (crc.Right - crc.Left) / 2,
                     Bottom = crc.Bottom - crc.Top,
                 };
             }
@@ -1280,7 +1321,7 @@ public partial class SwitcherOverlay : Window
         var stripWidth = last ? Math.Max(cardW - 16, 60) : Math.Max(peek - 8, 40);
         var titleRoom = last ? Math.Max(stripWidth - 125, 30) : Math.Max(stripWidth - 72, 30);
         var thumbRoom = last ? Math.Max(thumbW, peek + 20) : Math.Max(peek, 60);
-        const double subHeight = 200; // title strip (32) + thumb (150) + bottom margin (14) + breathing room
+        const double subHeight = 250; // title strip (32) + thumb (200) + bottom margin (14) + breathing room
         var strip = new Grid
         {
             Width = stripWidth,
@@ -1342,7 +1383,7 @@ public partial class SwitcherOverlay : Window
         strip.Children.Add(tools);
         var thumb = new Border
         {
-            Height = 150,
+            Height = 200,
             Width = thumbRoom,
             HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Top,
@@ -2526,8 +2567,10 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
         }
     }
 
-    // Card thumbnail area width: fixed 150px height, width follows the
-    // window's real aspect ratio (native Alt+Tab sizing).
+    // Card thumbnail area width: the thumb box is 200px tall (native
+    // Alt+Tab tile height) and live previews center-crop to fill it via
+    // DWM RECTSOURCE; the width formula keeps the 150 base so card WIDTHS
+    // (and therefore the panel width, tuned to match Alt+Tab) stay put.
     public double ThumbWidth { get; }
 
     // True while a DWM live thumbnail is composited over the card — both
