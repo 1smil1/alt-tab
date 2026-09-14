@@ -1,6 +1,8 @@
 # alt-tab
 
-Windows 桌面的 Alt+Tab 增强切换器：把"最近使用"变成**固定数字标签的槽位模型**，直达、固定、堆叠、模板，全都在一个轻量常驻小工具里。
+A native **Alt-Tab replacement for Windows** — pinned slot numbers (1..10 stay forever), stack cascade, Alt+digit quick jump. C#/WPF/.NET 8, ~50MB self-contained installer.
+
+把"最近使用"变成**固定数字标签的槽位模型**：直达、固定、堆叠、模板，全都在一个轻量常驻小工具里。
 
 ![screenshot](docs/screenshot.png)
 
@@ -68,6 +70,15 @@ src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe --test-co
 # 安装包（需要 Inno Setup 6：winget install JRSoftware.InnoSetup）
 installer/build-installer.cmd
 ```
+
+## 替代品
+
+| 项目 | 平台 | 范式 | 与 alt-tab 的区别 |
+|---|---|---|---|
+| [MrBeanCpp/AltTaber](https://github.com/MrBeanCpp/AltTaber) | Windows | 类似原生 Alt+Tab 的循环 + 应用分组 | 无固定编号槽位、无堆叠级联、无快速直达 toggle |
+| [sigoden/window-switcher](https://github.com/sigoden/window-switcher) | Windows | Rust · 应用组 + 单一快捷键循环 | 无固定编号槽位、无堆叠、无快速直达 toggle |
+| Windows 内置 `Alt+Tab` | Windows | 纯最近使用流 | 无固定编号、无堆叠级联、依赖 Windows shell 缩略图 |
+| **alt-tab**（本项目） | Windows | **固定编号槽位 + 堆叠级联 + 快速直达 toggle** | — |
 
 ## 致谢
 
