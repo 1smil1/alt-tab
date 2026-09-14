@@ -1,0 +1,89 @@
+# alt-tab
+
+**语言：** [English](README.md) · [简体中文](README.zh-CN.md)
+
+Windows 桌面的 **Alt+Tab 增强切换器**：固定数字标签的槽位模型（1..10 永远不变）、堆叠级联、`Alt+数字` 快速直达 toggle。C#/WPF/.NET 8，约 50MB 自包含安装包，下载即装即用。
+
+把"最近使用"变成**固定数字标签的槽位模型**：直达、固定、堆叠、模板，全都在一个轻量常驻小工具里。
+
+![screenshot](docs/screenshot.png)
+
+## 特性
+
+- **槽位模型（固定=固定数字）**：pin 卡永久认领编号（3号永远是3号），未固定窗口按最近使用顺序流动补位；拖到固定卡旁边会"自然变成"空缺的编号
+- **Alt+Tab 全屏切换面板**：实时窗口缩略图（DWM 合成，Mica 背景正确渲染）、当前窗口复制卡（左起第一张）、上一窗口卡（0 号恒存在）
+- **快速直达 toggle**：`Alt+数字` 直达对应标签；目标已是前台时再按一次即**最小化**，再按恢复
+- **同应用堆叠（级联子卡）**：同类窗口折成一张卡，从左往右叠半展示全部成员；`Alt+数字` 长按进入堆叠内部，数字键/方向键在成员间移动，拖出即剥离
+- **成员固定**：堆叠内单个成员也可以固定位置，主标签与子标签联动
+- **智能排序**：设置窗口里添加规则（按进程/路径/标题/组），未固定窗口按规则优先流动；固定卡永不被排序移动
+- **模板**：把当前槽位布局一键导出为模板，之后一一对应套用（模板=整组固定）
+- **双卡并存**：当前窗口 / 上一窗口本身是固定卡时，编号区真身保留、首部显示副本——固定卡"一直存在，除非解除固定"
+- **托盘常驻**：左键设置、右键菜单，Explorer 重启自动重挂
+- **轻量**：GC 堆软上限 128MB，空闲内存占用低
+
+## 安装
+
+从 [Releases](../../releases) 下载 `alt-tab-setup-*.exe`：
+
+1. 双击安装（可自选路径，无需管理员）
+2. 可选：创建桌面快捷方式 / 开机自动启动
+3. 启动后常驻托盘，随时 `Alt+Tab` 唤出
+
+卸载：Windows 设置 → 应用 → alt-tab。卸载保留你的设置与固定（`%APPDATA%\WindowSwitcherWpf`）。
+
+## 使用
+
+默认热键（均可在设置窗口修改）：
+
+| 按键 | 作用 |
+|---|---|
+| `Alt + Tab` | 唤出切换面板；按住 Alt 连按 Tab 循环，松开 Alt 确认跳转，`Esc` 取消 |
+| `Alt + 1..9` | 一次直达对应编号的窗口（不弹面板）；目标已是前台时再按=最小化 |
+| `Alt + 0` | 直达上一个使用的窗口 |
+| `数字键`（面板内） | 跳到对应编号的卡；堆叠卡则进入其子页面 |
+| 方向键 | 面板内网格移动；`Esc` 取消/返回 |
+
+鼠标：点击卡片激活；📌 固定/解除固定；✕ 关闭窗口；拖拽排序（拖到固定卡左边会认领空缺编号）；拖一张卡到另一张上=堆叠集中，从堆叠拖出=剥离。
+
+## 配置
+
+设置窗口（托盘左键 / 面板右上角 ⚙）：主热键、一次直达修饰键、Alt+Tab 拦截、模板、智能排序规则，保存即热生效。
+
+数据文件（无需手动编辑）：
+
+- `%APPDATA%\WindowSwitcherWpf\config.json`：设置存储（热键/模板/智能排序），堆叠持久化也在这里
+- `%APPDATA%\WindowSwitcherWpf\order.json`：固定（pins）持久化，含堆叠成员固定
+
+旧版本 exe 同目录的 `config.json`（v1.0 便携布局）会在首次运行时自动迁移到上面位置，原文件随后删除。
+
+## 构建
+
+```bash
+dotnet build -c Release src/WindowSwitcherWpf
+# 产物: src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe
+
+# 自测（纯内存，不动真实配置）
+src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe --test-slots
+src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe --test-stack
+src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe --test-config
+
+# 安装包（需要 Inno Setup 6：winget install JRSoftware.InnoSetup）
+installer/build-installer.cmd
+```
+
+## 替代品
+
+| 项目 | 平台 | 范式 | 与 alt-tab 的区别 |
+|---|---|---|---|
+| [MrBeanCpp/AltTaber](https://github.com/MrBeanCpp/AltTaber) | Windows | 类似原生 Alt+Tab 的循环 + 应用分组 | 无固定编号槽位、无堆叠级联、无快速直达 toggle |
+| [sigoden/window-switcher](https://github.com/sigoden/window-switcher) | Windows | Rust · 应用组 + 单一快捷键循环 | 无固定编号槽位、无堆叠、无快速直达 toggle |
+| Windows 内置 `Alt+Tab` | Windows | 纯最近使用流 | 无固定编号、无堆叠级联、依赖 Windows shell 缩略图 |
+| **alt-tab**（本项目） | Windows | **固定编号槽位 + 堆叠级联 + 快速直达 toggle** | — |
+
+## 致谢
+
+交互设计参考了 [sigoden/window-switcher](https://github.com/sigoden/window-switcher)（MIT）。本项目为**独立原创实现**（C#/WPF 从零重写），并非其 fork，未复制其源码；其 MIT 许可声明见 [REFERENCE_LICENSE](REFERENCE_LICENSE)。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 1smil1

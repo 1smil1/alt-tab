@@ -1,89 +1,87 @@
 # alt-tab
 
-A native **Alt-Tab replacement for Windows** — pinned slot numbers (1..10 stay forever), stack cascade, Alt+digit quick jump. C#/WPF/.NET 8, ~50MB self-contained installer.
+**Languages:** [English](README.md) · [简体中文](README.zh-CN.md)
 
-把"最近使用"变成**固定数字标签的槽位模型**：直达、固定、堆叠、模板，全都在一个轻量常驻小工具里。
+A native **Alt-Tab replacement for Windows** — pinned slot numbers (1..10 stay forever), stack cascade, Alt+digit quick jump. C#/WPF/.NET 8, ~50MB self-contained installer.
 
 ![screenshot](docs/screenshot.png)
 
-C# / WPF / .NET 8 实现，安装包自包含 .NET 运行时，下载即装即用。
+## Features
 
-## 特性
+- **Pinned slot model (fixed = fixed digit)**: pin a window to a number and it stays there forever (slot 3 is always slot 3); unpinned windows flow into the remaining digits by recent use; dragging an unpinned window next to a pinned one makes it "naturally" claim the vacant digit.
+- **Full Alt+Tab replacement overlay**: live DWM-composed thumbnails (Mica background renders correctly), copy card of the current window (leftmost), most-recent card (slot 0, always present).
+- **Quick-jump toggle**: `Alt+digit` jumps straight to that slot without opening the overlay; if the target is already foreground, pressing again **minimizes** it, and again restores.
+- **Same-app stacking (cascade sub-cards)**: multiple windows of the same app collapse into one card, fanned out left-to-right; `Alt+digit` (held) enters the stack's member view — digits/arrows move between members, drag out = peel.
+- **Member pin**: pin a position inside a stack; the parent stack pin and member pin stay in sync.
+- **Smart sort**: rules (by process / path / title / group) reorder the unpinned flow fill; pinned cards are never moved by sort rules.
+- **Templates**: export the current slot layout as a template, then apply later one-to-one (a template is a complete pin set).
+- **Duplicate copy cards**: when the current window or most-recent window is itself a pinned window, the real card stays in the numbered region and a display copy appears at the front — "pinned cards stay forever unless unpinned".
+- **Tray-resident**: left-click = settings, right-click menu, auto-re-attach on Explorer restart.
+- **Lightweight**: GC heap ceiling 128MB, low idle memory.
 
-- **槽位模型（固定=固定数字）**：pin 卡永久认领编号（3号永远是3号），未固定窗口按最近使用顺序流动补位；拖到固定卡旁边会"自然变成"空缺的编号
-- **Alt+Tab 全屏切换面板**：实时窗口缩略图（DWM 合成，Mica 背景正确渲染）、当前窗口复制卡（左起第一张）、上一窗口卡（0 号恒存在）
-- **快速直达 toggle**：`Alt+数字` 直达对应标签；目标已是前台时再按一次即**最小化**，再按恢复
-- **同应用堆叠（级联子卡）**：同类窗口折成一张卡，从左往右叠半展示全部成员；`Alt+数字` 长按进入堆叠内部，数字键/方向键在成员间移动，拖出即剥离
-- **成员固定**：堆叠内单个成员也可以固定位置，主标签与子标签联动
-- **智能排序**：设置窗口里添加规则（按进程/路径/标题/组），未固定窗口按规则优先流动；固定卡永不被排序移动
-- **模板**：把当前槽位布局一键导出为模板，之后一一对应套用（模板=整组固定）
-- **双卡并存**：当前窗口 / 上一窗口本身是固定卡时，编号区真身保留、首部显示副本——固定卡"一直存在，除非解除固定"
-- **托盘常驻**：左键设置、右键菜单，Explorer 重启自动重挂
-- **轻量**：GC 堆软上限 128MB，空闲内存占用低
+## Install
 
-## 安装
+Download `alt-tab-setup-*.exe` from [Releases](../../releases):
 
-从 [Releases](../../releases) 下载 `alt-tab-setup-*.exe`：
+1. Double-click to install (custom path, no admin needed).
+2. Optional: create a desktop shortcut / launch at startup.
+3. Runs in the tray; press `Alt+Tab` anywhere to invoke.
 
-1. 双击安装（可自选路径，无需管理员）
-2. 可选：创建桌面快捷方式 / 开机自动启动
-3. 启动后常驻托盘，随时 `Alt+Tab` 唤出
+Uninstall: Windows Settings → Apps → alt-tab. Uninstall keeps your settings and pins (`%APPDATA%\WindowSwitcherWpf`).
 
-卸载：Windows 设置 → 应用 → alt-tab。卸载保留你的设置与固定（`%APPDATA%\WindowSwitcherWpf`）。
+## Usage
 
-## 使用
+Default hotkeys (all editable in the Settings window):
 
-默认热键（均可在设置窗口修改）：
-
-| 按键 | 作用 |
+| Key | Action |
 |---|---|
-| `Alt + Tab` | 唤出切换面板；按住 Alt 连按 Tab 循环，松开 Alt 确认跳转，`Esc` 取消 |
-| `Alt + 1..9` | 一次直达对应编号的窗口（不弹面板）；目标已是前台时再按=最小化 |
-| `Alt + 0` | 直达上一个使用的窗口 |
-| `数字键`（面板内） | 跳到对应编号的卡；堆叠卡则进入其子页面 |
-| 方向键 | 面板内网格移动；`Esc` 取消/返回 |
+| `Alt + Tab` | Open the overlay; hold Alt and tap Tab to cycle, release Alt to commit, `Esc` to cancel |
+| `Alt + 1..9` | Quick-jump to that digit (no overlay); target already foreground = minimize |
+| `Alt + 0` | Quick-jump to the most-recently-used window |
+| Digit keys (in overlay) | Jump to that slot's card; for a stack card, enter its member view |
+| Arrow keys | Move in the overlay grid; `Esc` cancels or returns |
 
-鼠标：点击卡片激活；📌 固定/解除固定；✕ 关闭窗口；拖拽排序（拖到固定卡左边会认领空缺编号）；拖一张卡到另一张上=堆叠集中，从堆叠拖出=剥离。
+Mouse: click a card to activate; 📌 pin/unpin; ✕ close; drag to reorder (dragging next to a pin claims the vacant digit); drag onto another card = stack, drag out of a stack = peel.
 
-## 配置
+## Configuration
 
-设置窗口（托盘左键 / 面板右上角 ⚙）：主热键、一次直达修饰键、Alt+Tab 拦截、模板、智能排序规则，保存即热生效。
+Settings window (tray left-click / ⚙ top-right of the overlay): main hotkey, quick-jump modifier, Alt+Tab suppression, templates, smart-sort rules — all hot-applied on save.
 
-数据文件（无需手动编辑）：
+Data files (no manual editing needed):
 
-- `%APPDATA%\WindowSwitcherWpf\config.json`：设置存储（热键/模板/智能排序），堆叠持久化也在这里
-- `%APPDATA%\WindowSwitcherWpf\order.json`：固定（pins）持久化，含堆叠成员固定
+- `%APPDATA%\WindowSwitcherWpf\config.json` — settings (hotkey / templates / smart sort); stacks also persist here.
+- `%APPDATA%\WindowSwitcherWpf\order.json` — pins (including stack-member pins).
 
-旧版本 exe 同目录的 `config.json`（v1.0 便携布局）会在首次运行时自动迁移到上面位置，原文件随后删除。
+The legacy v1.0 portable `config.json` next to the exe is auto-migrated to the above location on first run; the old file is then deleted.
 
-## 构建
+## Build
 
 ```bash
 dotnet build -c Release src/WindowSwitcherWpf
-# 产物: src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe
+# output: src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe
 
-# 自测（纯内存，不动真实配置）
+# self-tests (pure in-memory, never touch real config)
 src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe --test-slots
 src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe --test-stack
 src/WindowSwitcherWpf/bin/Release/net8.0-windows/WindowSwitcherWpf.exe --test-config
 
-# 安装包（需要 Inno Setup 6：winget install JRSoftware.InnoSetup）
+# installer (needs Inno Setup 6: winget install JRSoftware.InnoSetup)
 installer/build-installer.cmd
 ```
 
-## 替代品
+## Alternatives
 
-| 项目 | 平台 | 范式 | 与 alt-tab 的区别 |
+| Project | Platform | Paradigm | Compared to alt-tab |
 |---|---|---|---|
-| [MrBeanCpp/AltTaber](https://github.com/MrBeanCpp/AltTaber) | Windows | 类似原生 Alt+Tab 的循环 + 应用分组 | 无固定编号槽位、无堆叠级联、无快速直达 toggle |
-| [sigoden/window-switcher](https://github.com/sigoden/window-switcher) | Windows | Rust · 应用组 + 单一快捷键循环 | 无固定编号槽位、无堆叠、无快速直达 toggle |
-| Windows 内置 `Alt+Tab` | Windows | 纯最近使用流 | 无固定编号、无堆叠级联、依赖 Windows shell 缩略图 |
-| **alt-tab**（本项目） | Windows | **固定编号槽位 + 堆叠级联 + 快速直达 toggle** | — |
+| [MrBeanCpp/AltTaber](https://github.com/MrBeanCpp/AltTaber) | Windows | Native-style cycle + app grouping | No pinned slots, no stacking, no quick-jump toggle |
+| [sigoden/window-switcher](https://github.com/sigoden/window-switcher) | Windows | Rust · app groups + single hotkey cycle | No pinned slots, no stacking, no quick-jump toggle |
+| Windows built-in `Alt+Tab` | Windows | Pure MRU flow | No pinned slots, no stacking, depends on Windows shell thumbnails |
+| **alt-tab** (this project) | Windows | **Pinned slots + stack cascade + quick-jump toggle** | — |
 
-## 致谢
+## Acknowledgements
 
-交互设计参考了 [sigoden/window-switcher](https://github.com/sigoden/window-switcher)（MIT）。本项目为**独立原创实现**（C#/WPF 从零重写），并非其 fork，未复制其源码；其 MIT 许可声明见 [REFERENCE_LICENSE](REFERENCE_LICENSE)。
+Interaction design references [sigoden/window-switcher](https://github.com/sigoden/window-switcher) (MIT). This is an **independent original implementation** (C#/WPF rewritten from scratch), not a fork; no source copied. Their MIT notice is at [REFERENCE_LICENSE](REFERENCE_LICENSE).
 
-## 许可证
+## License
 
 [MIT](LICENSE) © 2026 1smil1
