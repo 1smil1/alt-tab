@@ -15,6 +15,8 @@ public partial class App : Application
     private static readonly Mutex? SingleInstanceMutex;
 
     private KeyboardHook? _keyboard;
+    private MouseHook? _mouse;
+    private System.Windows.Threading.DispatcherTimer? _watchdog;
     private OrderStore? _orderStore;
     private WindowGroupingService? _grouping;
     private SwitcherController? _controller;
@@ -45,14 +47,28 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // 崩溃日志三层覆盖, 下次进程神秘消失时能定位是哪一层死的.
+        // - AppDomain: 兜底 catch-all (非 UI 线程, native callback, finalizer).
+        // - Dispatcher: UI 线程未处理异常, 默认会杀进程 — 设 Handled=true
+        //   至少让进程继续, log 留证据.
+        // - TaskScheduler: Task.Run / ContinueWith 的未观察异常.
         AppDomain.CurrentDomain.UnhandledException += (s, args) =>
-            Log.Error("AppDomain", "UnhandledException: " + args.ExceptionObject);
+            Log.Error("AppDomain", $"UnhandledException terminating={args.IsTerminating}: " + args.ExceptionObject);
         System.Windows.Threading.Dispatcher.CurrentDispatcher.UnhandledException += (s, args) =>
         {
             Log.Exception("Dispatcher", args.Exception);
             args.Handled = true;
         };
-        Log.Info("App", $"startup args={string.Join(' ', e.Args)}");
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, args) =>
+        {
+            Log.Exception("TaskScheduler", args.Exception);
+            args.SetObserved();
+        };
+        // Dispatcher hook 的 native 异常 (DWM / DWM thumb / SetWindowComposition
+        // 抛 SEH): catch 在我们的处理函数外 — 没接住就是直接终止.
+        // 上面三层没接到的, OS 直接终止 → 我们看不到 log, 但能间接判断:
+        // 后续进程重启时读上一份 log, 末尾应该是异常堆栈.
+        Log.Info("App", $"startup args={string.Join(' ', e.Args)} pid={System.Diagnostics.Process.GetCurrentProcess().Id}");
         base.OnStartup(e);
 
         if (e.Args.Length > 0 && e.Args[0] == "--debug-enum")
@@ -88,6 +104,16 @@ public partial class App : Application
             RunStackTests();
             Shutdown();
             return;
+        }
+
+        // -autostart = Task Scheduler 登录触发拉起. 桌面/explorer 还没全 ready
+        // 就装 LL hook 会导致 Alt+Tab 间歇失效 (用户实测 1次系统的/1次我
+        // 们的). 等 10s 让交互会话就绪. 手动启动不会带这个参数, 无延迟.
+        var isAutoStart = Array.IndexOf(e.Args, "-autostart") >= 0;
+        if (isAutoStart)
+        {
+            Log.Info("App", "autostart mode: delaying 10s for desktop ready");
+            Thread.Sleep(TimeSpan.FromSeconds(10));
         }
 
         if (e.Args.Length > 0 && e.Args[0] == "--dump-slotted")
@@ -168,6 +194,20 @@ public partial class App : Application
             hwnd => ActivationService.Activate(hwnd),
             new ConfigStore());
 
+        // 开机自启动首次落盘: cfg.AutoStart ?? true (新装 + 老装都不感知)
+        // + 注册表里尚未写 / 路径不匹配 → 写 HKCU\Run. 用户在设置里改成
+        // false 后保存即落 cfg.AutoStart=false, 此分支不再触发. 路径不
+        // 匹配 (用户重装到别处) 也写一次, 让自启永远指向当前 exe.
+        var wantAutoStart = _controller.Config.AutoStart ?? true;
+        if (wantAutoStart && !AutoStartService.IsEnabled())
+        {
+            AutoStartService.Apply(true, AutoStartService.GetCurrentExePath());
+        }
+        else if (!wantAutoStart && AutoStartService.IsEnabled())
+        {
+            AutoStartService.Apply(false, AutoStartService.GetCurrentExePath());
+        }
+
         _overlay = new SwitcherOverlay(_controller);
         _overlay.Hide();
 
@@ -185,6 +225,60 @@ public partial class App : Application
         _keyboard.QuickJumpUp += OnQuickJumpUp;
         _keyboard.Install();
 
+        // Click-outside (overlay 矩形外的鼠标按键 → cancel): 需要全局 LL
+        // mouse hook — SwitcherOverlay 用 ShowActivated=False, WPF Window
+        // .Deactivated 永远不触发, 跨进程点击也只有全局 hook 能截到.
+        _mouse = new MouseHook();
+        _mouse.ClickOutsideOverlay += OnMouseClickOutside;
+        _mouse.Install();
+
+        // 健康心跳 (2s): 周期性打点 pump 活性 + 主线程心跳. 之前用 15s,
+        // 但 pump 实测会每 ~15s 死一次 (GetMessageW 返回 0/错误, OS 没发
+        // WM_QUIT), 死后 15s 才检测 → 用户按 Alt+Tab 撞上"hook 已死"窗口
+        // = 系统原生冒出. 缩到 2s, 死后 2s 内 reinstall, 用户感知不到.
+        _watchdog = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(2),
+        };
+        _watchdog.Tick += (_, _) =>
+        {
+            // pump 死了 → 尝试 Unhook + 重装 (同进程内, 不重启). 如果
+            // 重装也失败 (hook id 全被 OS 锁住 / 杀软拒绝) 才真正"消失".
+            // 字段之间的 race: DispatcherTimer 跑在 UI 线程, IsPumpAlive
+            // 是 volatile bool, 主线程读到的 false 即是 pump 死了; 这之
+            // 后主线程做 Dispose 是顺序的, 不会有第二个 Tick 进来抢.
+            var kbAlive = _keyboard?.IsPumpAlive ?? false;
+            var msAlive = _mouse?.IsPumpAlive ?? false;
+            Log.Info("Watchdog", $"tick pump(kbd)={kbAlive} pump(mouse)={msAlive}");
+            if (!kbAlive && _keyboard is not null)
+            {
+                try
+                {
+                    _keyboard.Dispose();
+                    _keyboard.Install();
+                    Log.Info("Watchdog", "keyboard hook reinstalled after death");
+                }
+                catch (Exception ex)
+                {
+                    Log.Exception("Watchdog.reinstall.kb", ex);
+                }
+            }
+            if (!msAlive && _mouse is not null)
+            {
+                try
+                {
+                    _mouse.Dispose();
+                    _mouse.Install();
+                    Log.Info("Watchdog", "mouse hook reinstalled after death");
+                }
+                catch (Exception ex)
+                {
+                    Log.Exception("Watchdog.reinstall.ms", ex);
+                }
+            }
+        };
+        _watchdog.Start();
+
         _overlay!.SettingsRequested += OnSettingsRequested;
 
         // 托盘图标: 挂在隐藏宿主 HWND 上 (可见性来源), 同进程一个 HICON,
@@ -196,6 +290,8 @@ public partial class App : Application
             {
                 _overlay?.ShowAndFocus();
                 _keyboard?.SetOverlayOpen(true);
+                if (_overlay is not null)
+                    _mouse?.SetOwnerHwnd(new WindowInteropHelper(_overlay).Handle);
             },
             () => Shutdown());
         HwndSource.FromHwnd(hostHwnd)!.AddHook(_tray.WndProc);
@@ -206,6 +302,11 @@ public partial class App : Application
         Log.Info("App", "OnOverlayRequested");
         _overlay?.ShowAndFocus();
         _keyboard?.SetOverlayOpen(true);
+        // Overlay 已 show, 锁定 owner hwnd 让 mouse hook 知道矩形: click
+        // 在矩形外 → cancel. ShowAndFocus 已把 overlay 真的显示; hwnd 这时
+        // 一定能拿到 (SourceInitialized 之前 Show 内部已 EnsureHandle).
+        if (_overlay is not null)
+            _mouse?.SetOwnerHwnd(new WindowInteropHelper(_overlay).Handle);
     }
 
     private SettingsWindow? _settings;
@@ -217,6 +318,7 @@ public partial class App : Application
     {
         Log.Info("App", "OnSettingsRequested");
         _overlay?.Cancel();
+        _mouse?.ClearOwnerHwnd();
         _keyboard?.SetOverlayOpen(false);
         if (_settings is { IsLoaded: true }) { _settings.Activate(); return; }
         _settings = new SettingsWindow(new ConfigStore(),
@@ -261,7 +363,22 @@ public partial class App : Application
         }
         else
         {
-            Log.Info("App", $"hotkey '{hotkey}' invalid (v1 需含 Alt) — 默认 Alt+`");
+            Log.Info("App", $"hotkey '{hotkey}' invalid (v1 需含 Alt) — fallback Alt+Tab");
+        }
+        // 第二热键: 一按就开, Esc 才关 (不挂 Alt-up commit). 空字符串 = 禁用.
+        var second = _controller.Config.SecondHotkey;
+        if (!string.IsNullOrWhiteSpace(second)
+            && HotkeyParser.TryParseKey(second, out var svk) && HotkeyParser.HasAlt(second))
+        {
+            hook.SecondTriggerVirtualKey = svk;
+            hook.SecondTriggerScanCode = NativeMethods.MapVirtualKey(svk, NativeMethods.MAPVK_VK_TO_VSC);
+            Log.Info("App", $"second hotkey '{second}' → vk=0x{svk:X2} sc=0x{hook.SecondTriggerScanCode:X2}");
+        }
+        else
+        {
+            hook.SecondTriggerVirtualKey = 0;
+            hook.SecondTriggerScanCode = 0;
+            Log.Info("App", $"second hotkey '{second ?? "<null>"}' — disabled");
         }
         hook.QuickModifierVirtualKeys = HotkeyParser.ModifierKeys(
             _controller.Config.QuickJumpModifier);
@@ -335,14 +452,32 @@ public partial class App : Application
         // on _isOpen); calling _controller.Commit() here too made EVERY
         // commit run twice.
         _overlay?.Commit();
+        _mouse?.ClearOwnerHwnd();
         _keyboard?.SetOverlayOpen(false);
+        // commit 后 SetForegroundWindow 切到别进程, OS 可能禁用我们的 LL
+        // hook (用户实测: 1次系统的, 1次我们的交替) → 强制重装让回调重被调.
+        _keyboard?.Reinstall();
     }
 
     private void OnOverlayCancel()
     {
         Log.Info("App", "OnOverlayCancel");
         _overlay?.Cancel();
+        _mouse?.ClearOwnerHwnd();
         _keyboard?.SetOverlayOpen(false);
+    }
+
+    /// <summary>Mouse 钩子报: 用户在 overlay 矩形外点了一下. 等同未选 Esc
+    /// → cancel overlay (第二条热键场景下也用 — Esc 走 hook, click 走这里).</summary>
+    private void OnMouseClickOutside()
+    {
+        if (_keyboard is null || !_overlay?.IsLoaded == true) return;
+        // 拖拽过程中不响应 click-outside: 用户可能只是点了一下目标 — 让
+        // drag 的 mouse capture / release 自然处理, 这里只接管"已落 release"
+        // 的非拖拽场景. SwitcherOverlay 自身在拖拽期间持有 Mouse.Captured;
+        // 但 DragCard 在 card 内捕获, overlay 外的 release 由 OnOverlayMouseUp
+        // (drag=true) 提前 return. 这里只是双保险.
+        OnOverlayCancel();
     }
 
     private void OnOverlayEscape()
@@ -594,6 +729,34 @@ public partial class App : Application
             s15.Count == 3 && s15[0].Slot == 0 && !s15[0].IsSlot0Copy
             && s15.Count(x => x.Entry.Title == "c") == 1,
             string.Join(',', s15.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsSlot0Copy ? "^" : "")}")));
+
+        // 16. Pin title-follow (修复: 标题易变窗口的固定"自己取消"): pin
+        //     GroupKey+Title 失配但上次 hwnd 还活着且进程组未变 → 跟到新标题.
+        static WindowEntry Wk(IntPtr h, string title) =>
+            new(h, title, "app.exe", @"C:\apps\app.exe", "group:app", false);
+        var hwnd16 = new IntPtr(0x42);
+        var pin16 = new PinDefinition("group:app", "a.py - proj", 3);
+        var map16 = new Dictionary<PinDefinition, IntPtr> { [pin16] = hwnd16 };
+        var mru16 = new List<WindowEntry> { Wk(hwnd16, "b.py - proj") };
+        var ch16 = SwitcherController.FollowPinTitles(new List<PinDefinition> { pin16 }, mru16, map16);
+        Check("pin-follow-title",
+            ch16 && pin16.Title == "b.py - proj" && map16[pin16] == hwnd16);
+
+        // 17. 僵尸去重: 跟随目标标题已有同键 pin (失配后手动重固定攒下的
+        //     重复) → 僵尸删除, 只留活 pin.
+        var pin17 = new PinDefinition("group:app", "a.py - proj", 3);
+        var twin17 = new PinDefinition("group:app", "b.py - proj", 3);
+        var map17 = new Dictionary<PinDefinition, IntPtr> { [pin17] = hwnd16 };
+        var pins17 = new List<PinDefinition> { pin17, twin17 };
+        var ch17 = SwitcherController.FollowPinTitles(pins17, mru16, map17);
+        Check("pin-follow-zombie-dedupe", ch17 && pins17.Count == 1 && pins17[0] == twin17);
+
+        // 18. 窗口已关 → 维持休眠 (pin 跨会话存活语义不变).
+        var pin18 = new PinDefinition("group:app", "a.py - proj", 3);
+        var map18 = new Dictionary<PinDefinition, IntPtr> { [pin18] = hwnd16 };
+        var pins18 = new List<PinDefinition> { pin18 };
+        var ch18 = SwitcherController.FollowPinTitles(pins18, new List<WindowEntry>(), map18);
+        Check("pin-follow-window-gone", !ch18 && pins18.Count == 1 && pin18.Title == "a.py - proj");
 
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
@@ -853,7 +1016,14 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        // 退出码 + 时间戳 落 log. 下次进程神秘消失时读这份 log 能区分:
+        // 1) OnExit 走到了 → 我们自己走 (单实例互斥锁冲突, 用户右键退出, …)
+        // 2) 没走到 → OS 强杀 (杀软 / GameInputRedist / 第三方工具) — 日志
+        //    在某条业务日志后戛然而止, 无 exit 标记.
+        Log.Info("App", $"exit code={e.ApplicationExitCode}");
+        _watchdog?.Stop();
         _tray?.Dispose();
+        _mouse?.Dispose();
         _keyboard?.Dispose();
         SingleInstanceMutex?.ReleaseMutex();
         SingleInstanceMutex?.Dispose();

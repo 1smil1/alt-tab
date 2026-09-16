@@ -48,11 +48,36 @@ public partial class SwitcherOverlay : Window
         SizeChanged += (_, _) => { UpdateLiveRects(); LayoutCascades(); };
         Scroller.ScrollChanged += (_, _) => { UpdateLiveRects(); LayoutCascades(); };
 
+        // 点击 overlay 外任意位置退出 (用户: 点外面就退, 等同未选 Esc):
+        // WPF Window.Deactivated 在失焦时触发. ShowAndFocus 激活后会
+        // 紧跟一个不期望的 Deactivated (如其他进程抢焦点 / DWM 弹通知),
+        // 用 _suppressDeactivatedCancel + 短延迟关闭兜底, 直到 Activated
+        // 真正落地为止.
+        Deactivated += OnDeactivated;
+        Activated += (_, _) => _suppressDeactivatedCancel = false;
+
         _thumbTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(400),
         };
         _thumbTimer.Tick += (_, _) => RefreshThumbnails();
+    }
+
+    /// <summary>Deactivated 取消守卫: Show 之后的瞬时失焦不应误关.</summary>
+    private bool _suppressDeactivatedCancel;
+
+    private void OnDeactivated(object? sender, EventArgs e)
+    {
+        if (!_isOpen || _suppressDeactivatedCancel) return;
+        // 在 ApplicationIdle 之前若 Activated 触发 (Topmost 接管) 则撤销取消.
+        var dispatcher = Dispatcher;
+        dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!_isOpen) return;
+            if (IsActive) { _suppressDeactivatedCancel = false; return; }
+            WindowSwitcherWpf.Services.Log.Info("Overlay", "deactivated → cancel");
+            Cancel();
+        }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
     }
 
     public ObservableCollection<OverlayWindow> AllWindows => _windows;

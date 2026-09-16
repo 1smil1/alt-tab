@@ -20,8 +20,13 @@ public sealed class ConfigFile
 
     /// <summary>主快捷键 (唤出 overlay / 循环切换), 格式 "Alt+`" / "Alt+Tab" /
     /// "Alt+OemMinus"。修饰键必须含 Alt (v1 钩子模型: 松开 Alt = 提交)。
-    /// null/空 = 默认 "Alt+`"。</summary>
+    /// null/空 = 默认 "Alt+Tab" (替换系统 Alt+Tab).</summary>
     public string? Hotkey { get; set; }
+
+    /// <summary>第二个热键 (一按就开 overlay, 直到 Esc 才关 — 不受 Alt-up
+    /// 提交影响, 可选关闭). 格式同 Hotkey. null/空 = 默认 "Alt+`"。
+    /// 空字符串 = 禁用第二热键.</summary>
+    public string? SecondHotkey { get; set; }
 
     /// <summary>一次直达键的修饰键 (quick+N 直达第 N 个窗口), "Alt"/"Ctrl"/
     /// "Shift"/"Win"。null/空 = 默认 "Alt"。注意与两段式区分: 两段式
@@ -31,6 +36,10 @@ public sealed class ConfigFile
     /// <summary>是否拦截系统 Alt+Tab。null = 自动 (Hotkey 为 Alt+Tab 时
     /// 拦截, 否则放行); false = 永不拦截; true = 永远拦截。</summary>
     public bool? SuppressAltTab { get; set; }
+
+    /// <summary>开机自启动 (写 HKCU\...\Run). null = 默认 true (首次启动
+    /// 写一次注册表); true/false = 用户在设置里手动改过.</summary>
+    public bool? AutoStart { get; set; }
 }
 
 /// <summary>A named slot layout. Applying a template matches live windows

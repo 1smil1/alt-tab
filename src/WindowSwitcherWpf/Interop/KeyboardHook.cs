@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
-using System.Windows.Input;
 using System.Windows.Threading;
 using WindowSwitcherWpf.Services;
 using static WindowSwitcherWpf.Interop.NativeMethods;
@@ -9,9 +9,13 @@ using static WindowSwitcherWpf.Interop.NativeMethods;
 namespace WindowSwitcherWpf.Interop;
 
 /// <summary>
-/// WH_KEYBOARD_LL global hook. v1 uses a separate hotkey (default Alt+`)
-/// so the system Alt+Tab is NOT intercepted. Trigger key is configurable
-/// via <see cref="TriggerVirtualKey"/> / <see cref="TriggerScanCode"/>.
+/// WH_KEYBOARD_LL global hook on a DEDICATED pump thread. LL 回调经安装线程
+/// 的消息循环派发 — 之前装在 UI 线程上, 开 overlay/GC 期间回调排队超过
+/// LowLevelHooksTimeout, Windows 把该次按键直接递给系统 = 原生 Alt+Tab
+/// 冒出来 (用户: 系统 alt tab 也起作用). 独立线程专职泵消息, 回调微秒级
+/// 返回, UI 重活走 BeginInvoke, 原生切换器不再漏出.
+/// Trigger key is configurable via <see cref="TriggerVirtualKey"/> /
+/// <see cref="TriggerScanCode"/>.
 /// </summary>
 public sealed class KeyboardHook : IDisposable
 {
@@ -46,14 +50,29 @@ public sealed class KeyboardHook : IDisposable
     public uint TriggerVirtualKey { get; set; } = 0xC0; // VK_OEM_3 = backtick
     public uint TriggerScanCode { get; set; } = 0x29;
 
+    /// <summary>第二热键 vk (一按就开 overlay, 持续存在; 直到 Esc 关).
+    /// 0 = 禁用. 区别于主热键: 不挂 Alt-up commit, 不进入循环 (OverlayAdvance
+    /// 走主热键的 Alt+Tab 体感).</summary>
+    public uint SecondTriggerVirtualKey { get; set; } = 0xC0; // VK_OEM_3
+    public uint SecondTriggerScanCode { get; set; } = 0x29;
+
     private readonly Dispatcher _dispatcher;
     private readonly LowLevelKeyboardProc _proc;
     private IntPtr _hook = IntPtr.Zero;
+    private Thread? _pumpThread;
+    private uint _pumpThreadId;
+    private ManualResetEventSlim? _ready;
+    private volatile bool _pumpAlive;
+    private volatile bool _stopRequested;
     private bool _altDown;
-    private bool _overlayOpen;
+    private volatile bool _overlayOpen;      // UI 线程 SetOverlayOpen 跨线程写
     // 一次直达状态: quick 修饰键是否按住 + 当前按住的数字 vk (0=无)
     private bool _quickModDown;
-    private uint _quickDigitVk;
+    private volatile uint _quickDigitVk;
+    /// <summary>第二热键打开的 overlay: Alt-up 不要自动 commit (一按就
+    /// 出现 + 持续存在, Esc 才关). 主热键打开则该标记 false, 保留松开
+    /// Alt 即提交的 Native 体感.</summary>
+    private volatile bool _suppressAltCommit;
 
     public KeyboardHook()
     {
@@ -63,19 +82,74 @@ public sealed class KeyboardHook : IDisposable
 
     public void Install()
     {
-        if (_hook != IntPtr.Zero) return;
-        var hMod = GetModuleHandleW(null);
-        _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, hMod, 0);
-        if (_hook == IntPtr.Zero)
+        if (_pumpThread is not null) return;
+        _stopRequested = false;
+        _ready = new ManualResetEventSlim();
+        _pumpThread = new Thread(HookThreadPump)
         {
-            var err = Marshal.GetLastWin32Error();
-            Log.Error("KeyboardHook", $"SetWindowsHookEx failed err={err}");
+            IsBackground = true,
+            Name = "KeyboardHookPump",
+        };
+        _pumpThread.Start();
+        _ready.Wait(2000);
+    }
+
+    // LL 钩子回调在本线程的消息循环里派发 — 永不被 UI 线程阻塞.
+    // 健壮性: 之前 pump 每 ~15s 死一次 (OS 没明显发 WM_QUIT 但 GetMessageW
+    // 返回 0) → 那段时间内 Alt+Tab 全走系统原生. 用户实测 "1次我们的, 2次系统".
+    // 现在: try/catch 兜底, _stopRequested 标志, 任何退出路径都 log 原因,
+    // 看守者间隔从 15s 缩到 2s → 死后 2s 内 reinstall, 用户感知不到.
+    private void HookThreadPump()
+    {
+        try
+        {
+            _pumpThreadId = GetCurrentThreadId();
+            var hMod = GetModuleHandleW(null);
+            _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, hMod, 0);
+            if (_hook == IntPtr.Zero)
+            {
+                var err = Marshal.GetLastWin32Error();
+                Log.Error("KeyboardHook", $"SetWindowsHookEx failed err={err}");
+                _ready!.Set();
+                return;
+            }
+            Log.Info("KeyboardHook", "installed (dedicated pump thread)");
+            _ready!.Set();
+            // 先标 alive 再进 GetMessageW 阻塞, 否则 2s 看守者 tick 读
+            // IsPumpAlive 仍为 false (没人标过 true) → 误判死, Dispose+
+            // Install 循环. 实测 "1次我们的, 2次系统" 就是这条路径.
+            _pumpAlive = true;
+            while (!_stopRequested)
+            {
+                if (GetMessageW(out var msg, IntPtr.Zero, 0, 0) > 0)
+                {
+                    _pumpAlive = true; // watchdog 通过 IsPumpAlive 周期性确认 pump 还在 pump.
+                    DispatchMessageW(ref msg);
+                }
+                else
+                {
+                    // GetMessageW 返回 0 (WM_QUIT) 或 -1 (错误). 都视为退出.
+                    Log.Warn("KeyboardHook",
+                        $"GetMessageW<=0 stop={_stopRequested} — exiting pump");
+                    break;
+                }
+            }
         }
-        else
+        catch (Exception ex)
         {
-            Log.Info("KeyboardHook", "installed");
+            Log.Exception("KeyboardHook.pump", ex);
+        }
+        finally
+        {
+            _pumpAlive = false; // 任何退出路径都标 false — 让 watchdog 立刻看见死亡
+            try { UnhookWindowsHookEx(_hook); } catch { }
+            _hook = IntPtr.Zero;
+            Log.Info("KeyboardHook", "pump exited, hook removed");
         }
     }
+
+    /// <summary>App watchdog 周期性读, 确认 pump 线程还在循环.</summary>
+    public bool IsPumpAlive => _pumpAlive;
 
     public void SetOverlayOpen(bool open)
     {
@@ -85,11 +159,28 @@ public sealed class KeyboardHook : IDisposable
 
     public void Dispose()
     {
-        if (_hook != IntPtr.Zero)
+        if (_pumpThread is null) return;
+        _stopRequested = true;
+        // 双保险: 既设标志, 又发 WM_QUIT, 以防 pump 卡在 GetMessageW.
+        PostThreadMessageW(_pumpThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+        _pumpThread.Join(1000);
+        _pumpThread = null;
+        Log.Info("KeyboardHook", "disposed");
+    }
+
+    /// <summary>Dispose + Install. commit 后 OS 可能禁用 LL hook (前台切换
+    /// 走的别进程), 强制重装让回调重新被 OS 调. App OnOverlayCommit 调.</summary>
+    public void Reinstall()
+    {
+        try
         {
-            UnhookWindowsHookEx(_hook);
-            _hook = IntPtr.Zero;
-            Log.Info("KeyboardHook", "disposed");
+            Dispose();
+            Install();
+            Log.Info("KeyboardHook", "reinstalled after commit");
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("KeyboardHook.Reinstall", ex);
         }
     }
 
@@ -100,7 +191,24 @@ public sealed class KeyboardHook : IDisposable
         var isUp = (data.flags & LLKHF_UP) != 0;
         var vk = data.vkCode;
         var sc = data.scanCode;
-        var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+        // 调研 log: 每次 Tab/Alt 按键回调都记 fg/pid, 验证 OS 是否在我们
+        // hook 之前就决定了切换器 (回调时焦点若已是切换器窗口 = OS 先决).
+        if (vk == 0x09 || vk == 0x12 || vk == 0xA4 || vk == 0xA5)
+        {
+            var fg = GetForegroundWindow();
+            GetWindowThreadProcessId(fg, out var fgPid);
+            Log.Info("KeyboardHook",
+                $"cb vk=0x{vk:X2} sc=0x{sc:X2} up={isUp} fg=0x{fg.ToInt64():X} pid={fgPid}");
+        }
+        // WPF Keyboard.Modifiers 有 UI 线程亲和 — 专用钩子线程上用原生查询.
+        var shift = (GetAsyncKeyState(0xA0) & 0x8000) != 0
+                 || (GetAsyncKeyState(0xA1) & 0x8000) != 0;
+        // Alt 实时状态 — 不依赖 _altDown 标志. 标志会被合成 Alt-up 事件
+        // (前台切换后 OS 释放旧前台进程的 Alt) 错位; GetAsyncKeyState 直
+        // 读物理状态, 更准.
+        var altHeld = (GetAsyncKeyState(0x12) & 0x8000) != 0
+                   || (GetAsyncKeyState(0xA4) & 0x8000) != 0
+                   || (GetAsyncKeyState(0xA5) & 0x8000) != 0;
 
         // 修饰键跟踪: Alt (overlay 触发/提交) + quick 修饰键 (一次直达).
         // Alt 三键同时属于两个角色 — 都要更新, 缺一不可.
@@ -110,11 +218,13 @@ public sealed class KeyboardHook : IDisposable
             if (vk == 0x12 || vk == 0xA4 || vk == 0xA5)
             {
                 _altDown = !isUp;
-                if (isUp && _overlayOpen)
+                if (isUp && _overlayOpen && !_suppressAltCommit)
                 {
                     Log.Info("KeyboardHook", "alt-up commit");
                     Fire(OverlayCommit);
                 }
+                // Alt-up 重置 suppress 标记 (下次再开第二热键再标记)
+                if (isUp) _suppressAltCommit = false;
             }
             if (Array.IndexOf(QuickModifierVirtualKeys, vk) >= 0)
                 _quickModDown = !isUp;
@@ -133,14 +243,14 @@ public sealed class KeyboardHook : IDisposable
 
         // Alt+Tab 拦截 (SuppressAltTab): 热键本身是 Tab 时触发分支已经
         // 吞掉了; 这里补拦截的是 "热键≠Tab 但配置了拦截" 的组合.
-        if (SuppressAltTabActive && _altDown && !isUp && vk == 0x09
+        if (SuppressAltTabActive && altHeld && !isUp && vk == 0x09
             && TriggerVirtualKey != 0x09)
         {
             Log.Info("KeyboardHook", "suppressed system alt+tab");
             return new IntPtr(1);
         }
 
-        if (_altDown && !isUp)
+        if (altHeld && !isUp)
         {
             Log.Info("KeyboardHook", $"alt+key vk=0x{vk:X2} sc=0x{sc:X2}");
             if (vk == TriggerVirtualKey || data.scanCode == TriggerScanCode)
@@ -149,12 +259,34 @@ public sealed class KeyboardHook : IDisposable
                 else { Log.Info("KeyboardHook", $"fire OverlayAdvance reverse={shift}"); Fire(() => OverlayAdvance?.Invoke(shift)); }
                 return new IntPtr(1);
             }
+            // 第二热键 (一按就开, 不挂 Alt-up commit): 仅在 _altDown 路径
+            // 触发是因为第二热键必须含 Alt (HotkeyParser.HasAlt 校验);
+            // 不参与 OverlayAdvance 循环 (主热键体感专属) — 仅首次开 overlay,
+            // 第二次按同一热键不重复触发.
+            if (SecondTriggerVirtualKey != 0
+                && (vk == SecondTriggerVirtualKey || data.scanCode == SecondTriggerScanCode))
+            {
+                if (!_overlayOpen)
+                {
+                    _overlayOpen = true;
+                    _suppressAltCommit = true; // 第二热键打开: Alt-up 不 commit
+                    Log.Info("KeyboardHook", "fire OverlayRequested (second hotkey)");
+                    Fire(OverlayRequested);
+                }
+                return new IntPtr(1);
+            }
+        }
+
+        // Esc / 方向键 / 数字键: 必须 Alt 按着 OR overlay 开着 (第二热键
+        // 开 overlay 后松 Alt, 这些键仍要响应). 主热键开 overlay 路径下
+        // Alt 一直按着, 也覆盖; overlay 关且 Alt up 时不进 — 让原生
+        // Esc/方向键照常工作.
+        if ((altHeld || _overlayOpen) && !isUp)
+        {
             if (vk == 0x1B)
             {
                 if (_overlayOpen)
                 {
-                    // Esc first leaves a stack sub view; the app decides
-                    // (overlay still open afterwards).
                     Log.Info("KeyboardHook", "fire OverlayEscape");
                     Fire(OverlayEscape);
                 }
@@ -168,17 +300,16 @@ public sealed class KeyboardHook : IDisposable
             {
                 if (vk == 0x26 || vk == 0x28 || vk == 0x25 || vk == 0x27)
                 {
-                    // 2D grid navigation: the overlay maps the vk to a flat
-                    // card index (left/right = ±1, up/down = ±columns).
                     var vkArrow = (int)vk;
                     Fire(() => OverlayArrow?.Invoke(vkArrow));
                     return new IntPtr(1);
                 }
-                // Alt+数字 (overlay open): main row 0-9 + numpad 0-9.
+                // overlay 开着: 数字键 (主行 + numpad) 跳编号; 第二热键场景
+                // 下不需要按 Alt, 是因为 overlay 已经"接管屏幕".
                 if (vk is >= 0x30 and <= 0x39 or >= 0x60 and <= 0x69)
                 {
                     var digit = DigitFromVk(vk);
-                    Log.Info("KeyboardHook", $"alt+digit {digit}");
+                    Log.Info("KeyboardHook", $"digit {digit} (overlay open)");
                     Fire(() => OverlayDigit?.Invoke(digit));
                     return new IntPtr(1);
                 }
@@ -202,6 +333,38 @@ public sealed class KeyboardHook : IDisposable
 
     private static int DigitFromVk(uint vk) =>
         vk >= 0x60 ? (int)(vk - 0x60) : (int)(vk - 0x30);
+
+    // ---------- 专用泵线程的 message loop P/Invoke (self-contained) ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int ptX;
+        public int ptY;
+    }
+
+    private const uint WM_QUIT = 0x0012;
+
+    [DllImport("user32.dll")]
+    private static extern int GetMessageW(out MSG msg, IntPtr hwnd, uint min, uint max);
+
+    [DllImport("user32.dll")]
+    private static extern bool DispatchMessageW(ref MSG msg);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostThreadMessageW(uint threadId, uint msg,
+        IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     private void Fire(Action? action)
     {

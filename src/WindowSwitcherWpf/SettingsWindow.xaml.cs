@@ -49,6 +49,7 @@ public partial class SettingsWindow : Window
 
         var cfg = store.Load();
         HotkeyBox.Text = cfg.Hotkey ?? "";
+        SecondHotkeyBox.Text = cfg.SecondHotkey ?? "";
         QuickModBox.SelectedIndex = (cfg.QuickJumpModifier ?? "Alt") switch
         {
             "Ctrl" => 1,
@@ -62,6 +63,7 @@ public partial class SettingsWindow : Window
             true => 1,
             false => 2,
         };
+        AutoStartBox.IsChecked = cfg.AutoStart ?? true;
         SortMethodList.ItemsSource = new ObservableCollection<SortMethodVM>(
             cfg.SortMethods.Select(m => new SortMethodVM
             {
@@ -79,16 +81,31 @@ public partial class SettingsWindow : Window
         ValidateHotkey();
     }
 
+    private void OnSecondHotkeyChanged(object sender, TextChangedEventArgs e)
+    {
+        ValidateHotkey();
+    }
+
     private void ValidateHotkey()
     {
         if (HotkeyBox is null || SaveButton is null) return;
         var ok = HotkeyParser.TryParseKey(HotkeyBox.Text, out var vk)
                  && HotkeyParser.HasAlt(HotkeyBox.Text);
+        // 第二热键: 空 = 禁用 (合法); 非空 = 须含 Alt 才合法.
+        var second = SecondHotkeyBox?.Text ?? "";
+        var secondOk = string.IsNullOrWhiteSpace(second)
+            || (HotkeyParser.TryParseKey(second, out _) && HotkeyParser.HasAlt(second));
         HotkeyBox.Background = ok
             ? System.Windows.Media.Brushes.Gray
             : System.Windows.Media.Brushes.IndianRed;
-        SaveButton.IsEnabled = ok;
-        StatusText.Text = ok ? "" : "主快捷键无效 (须含 Alt)";
+        if (SecondHotkeyBox is not null)
+            SecondHotkeyBox.Background = secondOk
+                ? System.Windows.Media.Brushes.Gray
+                : System.Windows.Media.Brushes.IndianRed;
+        SaveButton.IsEnabled = ok && secondOk;
+        StatusText.Text = !ok ? "主快捷键无效 (须含 Alt)"
+            : !secondOk ? "第二快捷键无效 (须含 Alt 或留空)"
+            : "";
     }
 
     private void OnSave(object sender, RoutedEventArgs e)
@@ -99,6 +116,8 @@ public partial class SettingsWindow : Window
         // 本窗口编辑的字段 → 写回 → 热生效回调.
         var cfg = _store.Load();
         cfg.Hotkey = HotkeyBox.Text;
+        cfg.SecondHotkey = string.IsNullOrWhiteSpace(SecondHotkeyBox.Text)
+            ? "" : SecondHotkeyBox.Text;
         cfg.QuickJumpModifier = QuickModBox.SelectedIndex switch
         {
             1 => "Ctrl",
@@ -125,6 +144,10 @@ public partial class SettingsWindow : Window
         cfg.Templates = TemplateList.Items.OfType<TemplateVM>()
             .Select(t => new TemplateDefinition { Name = t.Name, Slots = t.Slots })
             .ToList();
+        cfg.AutoStart = AutoStartBox.IsChecked == true;
+        // 注册表即时落盘 (cfg.Save 失败也不会回滚勾选状态 — 用户至少知道
+        // 应用层记住了, 手动重勾可恢复).
+        AutoStartService.Apply(cfg.AutoStart == true, AutoStartService.GetCurrentExePath());
         _store.Save(cfg);
         _onSaved?.Invoke();
         Close();

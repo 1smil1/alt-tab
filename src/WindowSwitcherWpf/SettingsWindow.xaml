@@ -35,6 +35,19 @@
                             <ColumnDefinition Width="130"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
+                        <TextBlock Text="第二快捷键" Foreground="#FFE0E0E0"
+                                   VerticalAlignment="Center"/>
+                        <TextBox x:Name="SecondHotkeyBox" Grid.Column="1"
+                                 TextChanged="OnSecondHotkeyChanged"/>
+                    </Grid>
+                    <TextBlock Text='同上格式。一按就开面板, 持续存在, Esc 才关 (松开 Alt 不提交). 空 = 禁用.'
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
                         <TextBlock Text="一次直达修饰键" Foreground="#FFE0E0E0"
                                    VerticalAlignment="Center"/>
                         <ComboBox x:Name="QuickModBox" Grid.Column="1" Width="120"
@@ -59,6 +72,12 @@
                             <ComboBoxItem Content="从不拦截"/>
                         </ComboBox>
                     </Grid>
+                    <CheckBox x:Name="AutoStartBox" Content="开机自启动"
+                              Foreground="#FFE0E0E0" Margin="0,12,0,0"
+                              VerticalAlignment="Center"/>
+                    <TextBlock Text="登录后自动启动 (写 HKCU\...\Run, 不需管理员)"
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
                 </StackPanel>
             </Border>
 

@@ -38,6 +38,15 @@ public sealed class SwitcherController
     /// head card, and only surface in the stack sub view.</summary>
     public IReadOnlyList<SlotWindow> Slotted { get; private set; } = new List<SlotWindow>();
     private IntPtr _lastForeground;
+    /// <summary>枚举原始序 (EnumWindows 自顶向下 = 全局 z 序) — 与 Groups
+    /// 同一次 Refresh 的快照. "上一个窗口"/编号流补的真 MRU 语义以它为准:
+    /// 组序扁平化 (order.Groups 是拖拽持久序, 不随前台变) 会把第一 saved
+    /// 组的顶窗误当上一窗口.</summary>
+    private List<WindowEntry> _liveOrder = new();
+    /// <summary>pin → 上次匹配的活窗口 hwnd (FollowPinTitles 标题跟随的
+    /// 依据; 按 pin 实例引用作键 — PinDefinition 未重写 Equals. ReloadOrder
+    /// /模板整体替换 Pins 后旧键自然失效, 无需清理).</summary>
+    private readonly Dictionary<PinDefinition, IntPtr> _pinHwnd = new();
     public int ActiveFlatIndex { get; private set; }
     public int ActiveGroupIndex { get; private set; }
     public int ActiveWindowIndex { get; private set; }
@@ -109,10 +118,10 @@ public sealed class SwitcherController
         }
     }
 
-    /// <summary>Templates and sort methods from config.json (右上角 UI 的数据源).</summary>
+    /// <summary>Templates and sort methods from the settings store (右上角 UI 的数据源).</summary>
     public ConfigFile Config => _config;
 
-    /// <summary>设置窗口保存后重载 config.json — 模板/排序下拉与热键字段
+    /// <summary>设置窗口保存后重载设置存储 — 模板/排序下拉与热键字段
     /// 即时生效. Stacks 归 controller 独占维护, Load 拿回的就是最新.</summary>
     public void ReloadConfig()
     {
@@ -134,7 +143,8 @@ public sealed class SwitcherController
         Refresh();
         RebuildFlat(foreground);
         // 预选 0 号卡 (上个窗口) — Windows Alt+Tab 手感: 快速松开 = 切到
-        // 上个窗口. 复制卡占 index 0, 所以预选 index 1.
+        // 上个窗口. 复制卡占 index 0, 所以预选 index 1; 0 位是副本时副本
+        // 就是停靠卡, 蓝框画它自己 (用户: 0 就是 0 的蓝色框).
         ActiveFlatIndex = _flat.Count > 1 ? 1 : 0;
         ActiveGroupIndex = 0;
         ActiveWindowIndex = 0;
@@ -145,7 +155,17 @@ public sealed class SwitcherController
 
     private void RebuildFlat(IntPtr foreground)
     {
-        var mru = Groups.SelectMany(g => g.Windows).ToList();
+        // 真 MRU 序 = 全局 z 序 (枚举原始序, 与 Groups 同一次 Refresh 的
+        // 快照), 不是组序扁平化 — order.Groups 是拖拽固定的持久顺序, 不
+        // 随前台变; 按组扁平会让 slot0 恒为第一 saved 组的顶窗, 而 "上一
+        // 个窗口" (用户: 微信切走后 0 号必须是微信) 是 z 序里 fg 之下的
+        // 第一个. 网格按 Slotted (slot 序) 渲染, 组序只活在组视图/持久化.
+        var flat = Groups.SelectMany(g => g.Windows).ToList();
+        var liveHwnds = new HashSet<IntPtr>(flat.Select(w => w.Hwnd));
+        var mru = _liveOrder.Where(w => liveHwnds.Contains(w.Hwnd)).ToList();
+        if (mru.Count != flat.Count)
+            foreach (var w in flat.Where(w => mru.All(m => m.Hwnd != w.Hwnd)))
+                mru.Add(w); // 快照缺员兜底 (理论不发生 — 同一次枚举)
         var idx = mru.FindIndex(w => w.Hwnd == foreground);
         if (idx > 0)
         {
@@ -153,6 +173,9 @@ public sealed class SwitcherController
             mru.RemoveAt(idx);
             mru.Add(entry);
         }
+        // fg 已停到队尾 — 快照完整 MRU (含随后会被抽出的堆叠 tail),
+        // 供下方 slot0/-2 的堆叠成员可见性补丁使用.
+        var fullMru = mru.ToList();
 
         // Stack collapse (集中): resolve every configured stack against the
         // alive windows; the head (first alive member) keeps its place in
@@ -199,7 +222,43 @@ public sealed class SwitcherController
             };
         }
 
+        // Pin 标题跟随 (修复: 编辑器/浏览器标题随文件/标签页变, pin 按
+        // GroupKey+Title 匹配随即失配 — 用户: 固定好的 3 号"自己取消固定
+        // 了"). 变更落盘, 下次启动 pin 已在新标题上.
+        if (FollowPinTitles(_order.Pins, mru, _pinHwnd))
+            _store.SaveDebounced(_order);
+
         var cards = AssignSlots(mru, _order.Pins, _activeSortRules, foreground);
+        // Slot 0/-2 的堆叠成员可见性 (用户: 上次用的是固定 2 标签的第二个
+        // 子标签, 0 号就出现这一个标签的纯单卡, 不呈堆叠形式 — 折叠形态
+        // 永远留在它的固定编号上): tail 成员已从 mru 抽出 (编号区永不见
+        // 成员), 但 "最近用过" 的语义里 tail 要参战 — 上一个窗口或当前
+        // 窗口是 tail 时把它补回 mru 对应位置再算一次 AssignSlots.
+        // 0 号/复制卡是纯单卡: tail 不是 head, StackInfoFor 不命中, 天然无级联.
+        bool IsAliveStackTail(WindowEntry w) => _stacksByHead.Values.Any(s =>
+            s.Head.Hwnd != w.Hwnd && s.Members.Any(m => m.Hwnd == w.Hwnd));
+        var patched = mru;
+        var changed = false;
+        if (fullMru.FirstOrDefault(w => w.Hwnd != foreground) is { } prev
+            && IsAliveStackTail(prev))
+        {
+            var tmp = new List<WindowEntry>(patched.Count + 1) { prev };
+            tmp.AddRange(patched);
+            patched = tmp; // 上一个窗口 = tail → 补回队首 (0 号 = 它的纯单卡)
+            changed = true;
+        }
+        if (foreground != default
+            && fullMru.Find(w => w.Hwnd == foreground) is { } fgEntry
+            && IsAliveStackTail(fgEntry))
+        {
+            patched = new List<WindowEntry>(patched) { fgEntry }; // 停队尾 → -2 复制卡
+            changed = true;
+        }
+        if (changed)
+            cards = AssignSlots(patched, _order.Pins, _activeSortRules, foreground);
+        // tail 只允许出现在 0 号/-2 复制位 — 补回 mru 后若被编号区流补
+        // 认领 (fg 停队尾会被 rest 收进去) 必须剔除, 堆叠成员永不占号.
+        cards.RemoveAll(c => c.Slot >= 1 && IsAliveStackTail(c.Entry));
         // 当前窗口卡 (Slot=-2 复制卡) 与 Slot 0 (上一个窗口) 由 AssignSlots
         // 统一插入 — 复制卡不参与数字寻址/导出/拖拽/cascade (SelectByDigit /
         // ExportCurrentAsTemplate / CanDrag 各自跳过), Slot 0 卡不可拖拽.
@@ -219,6 +278,51 @@ public sealed class SwitcherController
             if (_stacksByHead.TryGetValue(sw.Entry.Hwnd, out var info))
                 info.Slot = sw.Slot;
         }
+    }
+
+    /// <summary>Pin title-follow (标题易变窗口的固定自愈): pin 身份 =
+    /// GroupKey+Title, 而编辑器/浏览器标题随打开的文件/标签页变 — 一变
+    /// pin 就静默休眠, 编号空出 (用户: 固定好的 3 号"自己取消固定了").
+    /// 每个 pin 记住上次匹配的 hwnd: 标题失配但该 hwnd 还活着且进程组
+    /// 未变时, 把 pin 跟到当前标题; 跟完撞上同键 pin 说明这是重复固定
+    /// 攒下的僵尸副本, 就地删除自愈. 窗口已关则维持休眠 (pin 跨会话
+    /// 存活的语义不变). 静态纯函数 (lastHwnd 由调用方持有) — --test-slots
+    /// 覆盖. Returns true when pins were mutated (caller persists).</summary>
+    public static bool FollowPinTitles(List<PinDefinition> pins, List<WindowEntry> mru,
+        Dictionary<PinDefinition, IntPtr> lastHwnd)
+    {
+        var changed = false;
+        foreach (var pin in pins.ToList())
+        {
+            if (pin.MemberTitle is not null) continue; // 成员 pin 走堆叠 heal
+            var match = mru.Find(w => w.GroupKey == pin.GroupKey && w.Title == pin.Title);
+            if (match is not null)
+            {
+                lastHwnd[pin] = match.Hwnd; // 正常命中 — 刷新跟踪
+                continue;
+            }
+            if (!lastHwnd.TryGetValue(pin, out var last)) continue;
+            var follow = mru.Find(w => w.Hwnd == last && w.GroupKey == pin.GroupKey);
+            if (follow is null) continue; // 窗口关了 / 换了进程组 — 维持休眠
+            pins.Remove(pin);
+            changed = true;
+            var twin = pins.Any(p => p.MemberTitle is null
+                && p.GroupKey == follow.GroupKey && p.Title == follow.Title);
+            if (twin)
+            {
+                lastHwnd.Remove(pin);
+                WindowSwitcherWpf.Services.Log.Info("Controller",
+                    $"pin follow: slot={pin.Slot} '{pin.Title}' → zombie duplicate removed " +
+                    $"(live pin '{follow.Title}')");
+                continue;
+            }
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"pin follow: slot={pin.Slot} '{pin.Title}' → '{follow.Title}'");
+            pin.Title = follow.Title;
+            pins.Add(pin);
+            lastHwnd[pin] = follow.Hwnd;
+        }
+        return changed;
     }
 
     // ---------- Stack sub view (子标签页面) ----------
@@ -248,7 +352,7 @@ public sealed class SwitcherController
         _activeStackId = null;
         if (head is IntPtr h)
         {
-            var i = _flat.FindIndex(w => w.Hwnd == h);
+            var i = FlatIndexForSelection(h);
             ActiveFlatIndex = i >= 0 ? i : 0;
         }
         StateChanged?.Invoke();
@@ -402,7 +506,7 @@ public sealed class SwitcherController
 
     /// <summary>Generic structural matching (通用过滤): process name contains,
     /// module path contains, title contains, or exact group key. No
-    /// app-specific logic lives in code — only in the user's config.json.</summary>
+    /// app-specific logic lives in code — only in the user's settings.</summary>
     public static bool RuleMatches(WindowEntry w, SortRule r) => r.Type switch
     {
         "process" => w.ProcessName.Contains(r.Value, StringComparison.OrdinalIgnoreCase),
@@ -748,6 +852,21 @@ public sealed class SwitcherController
         return IntPtr.Zero;
     }
 
+    /// <summary>选中解析统一规则: 同 hwnd 双卡 (-2 副本 / 0号副本) 时取
+    /// 真卡 index — 副本不吃蓝框、不做光标停靠点 (用户: 光标依次递进,
+    /// 蓝框只画真卡); 只剩副本时取首个匹配. 未找到返回 -1.</summary>
+    private int FlatIndexForSelection(IntPtr hwnd)
+    {
+        var first = -1;
+        for (var i = 0; i < _flat.Count && i < Slotted.Count; i++)
+        {
+            if (_flat[i].Hwnd != hwnd) continue;
+            if (!Slotted[i].IsCardCopy) return i;
+            if (first < 0) first = i;
+        }
+        return first;
+    }
+
     /// <summary>Re-points ActiveFlatIndex at the previously selected hwnd
     /// after the list composition changed (pin toggle / drag).</summary>
     private void KeepSelection()
@@ -755,7 +874,7 @@ public sealed class SwitcherController
         var sel = _flat.Count == 0
             ? IntPtr.Zero
             : _flat[Math.Min(ActiveFlatIndex, _flat.Count - 1)].Hwnd;
-        var i = _flat.FindIndex(w => w.Hwnd == sel);
+        var i = FlatIndexForSelection(sel);
         ActiveFlatIndex = i >= 0 ? i : 0;
     }
 
@@ -767,7 +886,9 @@ public sealed class SwitcherController
 
     /// <summary>Flat card selection with wrap-around; used by Tab advance
     /// and by the arrow-key grid navigation in the overlay. Wraps within
-    /// the ACTIVE nav list (full cards, or stack members in the sub view).</summary>
+    /// the ACTIVE nav list (full cards, or stack members in the sub view).
+    /// 每张卡 (含 -2 副本 / 0号副本) 都是普通停靠点 — 蓝框按停靠索引画在
+    /// 那张卡本身 (用户: 0 就是 0 的蓝色框, 到 2 的时候只有 2 的)。</summary>
     public void SelectFlat(int index)
     {
         var n = Nav.Count;
@@ -777,7 +898,7 @@ public sealed class SwitcherController
     }
 
     /// <summary>导出: snapshot the current slot layout (slots 1..10) into
-    /// config.json as a new template. Same-name templates are replaced.</summary>
+    /// the settings store as a new template. Same-name templates are replaced.</summary>
     public int ExportCurrentAsTemplate(string name)
     {
         var slots = new List<TemplateSlot>();
@@ -814,6 +935,10 @@ public sealed class SwitcherController
         for (var i = 0; i < Slotted.Count; i++)
         {
             if (Slotted[i].IsCurrentCopy) continue; // 复制卡不被数字寻址
+            // Alt+0 = native Alt+Tab 一次再 commit: slot 0 在主页面恒为当前
+            // fg (= 复制卡的源), 命中它原地不动. 跳过 slot 0, 命中 slot 1
+            // (= 上一窗口) — 这正是用户对 Alt+0 的体感: "回到最近窗口".
+            if (digit == 0 && Slotted[i].Slot == 0) continue;
             if (Slotted[i].Slot == digit)
             {
                 ActiveFlatIndex = i;
@@ -1092,6 +1217,7 @@ public sealed class SwitcherController
     public void ReloadOrder()
     {
         _order = _store.Load();
+        _pinHwnd.Clear(); // 新 pin 实例 — 旧 hwnd 跟踪全部作废
         Refresh();
         StateChanged?.Invoke();
     }
@@ -1120,6 +1246,7 @@ public sealed class SwitcherController
         try
         {
             var live = _enumerator.Enumerate(onlyCurrentDesktop: true);
+            _liveOrder = live.ToList();
             var grouped = _grouping.Group(live, _order);
             Groups = grouped;
             if (ActiveGroupIndex >= Groups.Count) ActiveGroupIndex = 0;
