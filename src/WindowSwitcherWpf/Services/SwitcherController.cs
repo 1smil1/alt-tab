@@ -861,7 +861,7 @@ public sealed class SwitcherController
         for (var i = 0; i < _flat.Count && i < Slotted.Count; i++)
         {
             if (_flat[i].Hwnd != hwnd) continue;
-            if (!Slotted[i].IsCardCopy) return i;
+            if (!Slotted[i].IsCurrentCopy && !Slotted[i].IsSlot0Copy) return i;
             if (first < 0) first = i;
         }
         return first;

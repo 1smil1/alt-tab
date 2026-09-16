@@ -126,6 +126,12 @@ public sealed class WindowEnumerator
         if (hr == 0)
         {
             // DWM attribute works: trust it.
+            // 隐藏窗 (WS_VISIBLE off) 即使 hasIconic=1 也得踢出 — 我们自己的
+            // overlay Hide() 后若 DWM 仍记 iconic bitmap, 会混进 _liveOrder
+            // 顶端 (z 序最高), OpenOverlay 拿到的 fg=mru[last] 时 slot 0 = 自
+            // 己, 而不是真"上一个窗口". 结构性 fallback 一直有这条, DWM 成功
+            // 路径漏了.
+            if (!IsWindowVisible(hwnd)) return false;
             if (hasIconic == 0) return false;
             if (IsCloaked(hwnd, onlyCurrentDesktop)) return false;
             return true;
