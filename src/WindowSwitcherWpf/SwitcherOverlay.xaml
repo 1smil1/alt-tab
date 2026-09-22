@@ -60,55 +60,21 @@
                            VerticalAlignment="Center"
                            Margin="10,0,0,0"/>
             </StackPanel>
-            <!-- Header (右上角): template picker, smart-sort picker + apply,
-                 export — all data from the exe-adjacent config.json. -->
+            <!-- Header (右上角): 只剩设置入口 (模板/智能排序/导出已删). -->
             <StackPanel x:Name="MainHeader"
                         Grid.Row="0"
                         HorizontalAlignment="Right"
                         Orientation="Horizontal"
                         Margin="0,0,0,10">
-                <TextBlock Text="模板:"
-                           FontSize="12"
-                           Foreground="#FF404040"
-                           VerticalAlignment="Center"
-                           Margin="0,0,5,0"/>
-                <ComboBox x:Name="TemplateCombo"
-                          Width="130"
-                          FontSize="12"
-                          ToolTip="应用模板：已有标签和模板一一对应变成固定"
-                          SelectionChanged="OnTemplateSelected"/>
-                <TextBlock Text="排序:"
-                           FontSize="12"
-                           Foreground="#FF404040"
-                           VerticalAlignment="Center"
-                           Margin="12,0,5,0"/>
-                <ComboBox x:Name="SortCombo"
-                          Width="130"
-                          FontSize="12"
-                          ToolTip="智能排序方法（来自 config.json，可重复应用）"
-                          SelectionChanged="OnSortSelected"/>
-                <Button x:Name="SortApplyButton"
-                        Content="应用"
-                        FontSize="12"
-                        Padding="8,2"
-                        Margin="6,0,0,0"
-                        ToolTip="再次应用当前选中的智能排序"
-                        Click="OnSortApply"/>
-                <Button x:Name="ExportButton"
-                        Content="导出"
-                        FontSize="12"
-                        Padding="8,2"
-                        Margin="6,0,0,0"
-                        ToolTip="把当前槽位布局导出为模板（存入 config.json）"
-                        Click="OnExportClick"/>
                 <Button x:Name="SettingsButton"
                         Content="⚙ 设置"
                         FontSize="12"
                         Padding="8,2"
                         Margin="10,0,0,0"
-                        ToolTip="打开设置：快捷键 / 智能排序 / 模板"
+                        ToolTip="打开设置：快捷键 / 堆叠 / 自启动"
                         Click="OnSettingsClick"/>
             </StackPanel>
+
             <ScrollViewer x:Name="Scroller"
                           Grid.Row="1"
                           VerticalScrollBarVisibility="Auto"

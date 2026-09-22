@@ -19,7 +19,6 @@ public sealed class SwitcherController
     private readonly Action<IntPtr> _activate;
     private OrderFile _order;
     private ConfigFile _config = new();
-    private IReadOnlyList<SortRule>? _activeSortRules;
 
     public ObservableCollection<WindowGroup> Groups { get; private set; } = new();
 
@@ -121,8 +120,8 @@ public sealed class SwitcherController
     /// <summary>Templates and sort methods from the settings store (右上角 UI 的数据源).</summary>
     public ConfigFile Config => _config;
 
-    /// <summary>设置窗口保存后重载设置存储 — 模板/排序下拉与热键字段
-    /// 即时生效. Stacks 归 controller 独占维护, Load 拿回的就是最新.</summary>
+    /// <summary>设置窗口保存后重载设置存储 — 热键字段即时生效.
+    /// Stacks 归 controller 独占维护, Load 拿回的就是最新.</summary>
     public void ReloadConfig()
     {
         if (_configStore is null) return;
@@ -228,7 +227,7 @@ public sealed class SwitcherController
         if (FollowPinTitles(_order.Pins, mru, _pinHwnd))
             _store.SaveDebounced(_order);
 
-        var cards = AssignSlots(mru, _order.Pins, _activeSortRules, foreground);
+        var cards = AssignSlots(mru, _order.Pins, foreground);
         // Slot 0/-2 的堆叠成员可见性 (用户: 上次用的是固定 2 标签的第二个
         // 子标签, 0 号就出现这一个标签的纯单卡, 不呈堆叠形式 — 折叠形态
         // 永远留在它的固定编号上): tail 成员已从 mru 抽出 (编号区永不见
@@ -255,13 +254,13 @@ public sealed class SwitcherController
             changed = true;
         }
         if (changed)
-            cards = AssignSlots(patched, _order.Pins, _activeSortRules, foreground);
+            cards = AssignSlots(patched, _order.Pins, foreground);
         // tail 只允许出现在 0 号/-2 复制位 — 补回 mru 后若被编号区流补
         // 认领 (fg 停队尾会被 rest 收进去) 必须剔除, 堆叠成员永不占号.
         cards.RemoveAll(c => c.Slot >= 1 && IsAliveStackTail(c.Entry));
         // 当前窗口卡 (Slot=-2 复制卡) 与 Slot 0 (上一个窗口) 由 AssignSlots
         // 统一插入 — 复制卡不参与数字寻址/导出/拖拽/cascade (SelectByDigit /
-        // ExportCurrentAsTemplate / CanDrag 各自跳过), Slot 0 卡不可拖拽.
+        // CanDrag 各自跳过), Slot 0 卡不可拖拽.
         Slotted = cards;
         _flat = Slotted.Select(s => s.Entry).ToList();
         // Diagnostics: duplicate hwnds in the flat list break the cascade
@@ -367,48 +366,6 @@ public sealed class SwitcherController
         _activeStackId = null;
     }
 
-    /// <summary>Apply a template: match live windows to the template's slot
-    /// entries 一一对应 and make them the ENTIRE pin set (replaces manual
-    /// pins — 模板 is the highest tier). Returns matched count.</summary>
-    public int ApplyTemplate(TemplateDefinition template)
-    {
-        var live = Groups.SelectMany(g => g.Windows).ToList();
-        var newPins = new List<PinDefinition>();
-        var taken = new HashSet<string>();
-        foreach (var ts in template.Slots)
-        {
-            if (ts.Slot < 1 || ts.Slot > 10) continue;
-            var match = live.Find(w =>
-                string.Equals(w.GroupKey, ts.GroupKey, StringComparison.OrdinalIgnoreCase)
-                && (ts.Title.Length == 0 || w.Title == ts.Title)
-                && !taken.Contains(w.GroupKey + "\n" + w.Title));
-            if (match is null) continue;
-            taken.Add(match.GroupKey + "\n" + match.Title);
-            newPins.Add(new PinDefinition(match.GroupKey, match.Title, ts.Slot));
-        }
-        _order.Pins = newPins;
-        _store.SaveDebounced(_order);
-        RebuildFlat(_lastForeground);
-        KeepSelection();
-        StateChanged?.Invoke();
-        WindowSwitcherWpf.Services.Log.Info("Controller",
-            $"template '{template.Name}' applied: {newPins.Count}/{template.Slots.Count} slots matched");
-        return newPins.Count;
-    }
-
-    /// <summary>Set the active smart-sort method and reflow. Pins are never
-    /// moved (第三 tier only orders the rest). Re-invoking re-applies, so
-    /// after unpinning, clicking the method again sorts the freed window.</summary>
-    public void ApplySmartSort(SortMethodDefinition method)
-    {
-        _activeSortRules = method.Rules;
-        RebuildFlat(_lastForeground);
-        KeepSelection();
-        StateChanged?.Invoke();
-        WindowSwitcherWpf.Services.Log.Info("Controller",
-            $"smart sort '{method.Name}' applied rules={method.Rules.Count}");
-    }
-
     /// <summary>
     /// The slot model (固定=固定数字): slot 0 is the special most-recent
     /// card. Persisted pins hard-claim their number; every other window
@@ -419,7 +376,7 @@ public sealed class SwitcherController
     /// vacant number (MoveRelative).
     /// </summary>
     public static List<SlotWindow> AssignSlots(List<WindowEntry> mru, List<PinDefinition> pins,
-        IReadOnlyList<SortRule>? sortRules = null, IntPtr foreground = default)
+        IntPtr foreground = default)
     {
         var result = new List<SlotWindow>(mru.Count);
         if (mru.Count == 0) return result;
@@ -451,7 +408,7 @@ public sealed class SwitcherController
         // 拒绝.
         var rest = mru.Where((w, i) => i != slot0 || slot0Pinned).ToList();
 
-        // 1. Pins hard-claim their numbers (模板/手动固定 tier — both are pins;
+        // 1. Pins hard-claim their numbers (手动固定 tier;
         // smart sort NEVER moves them).
         var slotMap = new SortedDictionary<int, WindowEntry>();
         var pinnedKeys = new HashSet<(string, string)>();
@@ -469,16 +426,8 @@ public sealed class SwitcherController
             pinnedKeys.Add((pin.GroupKey, pin.Title));
         }
 
-        // 2. Unpinned windows: smart-sort rules reorder them before flow-fill
-        //    (智能排序 tier — first matching rule wins, unmatched trail in MRU).
-        IEnumerable<WindowEntry> ordered = rest;
-        if (sortRules is { Count: > 0 })
-        {
-            ordered = rest.Select((w, i) => (w, i))
-                .OrderBy(t => RuleIndex(t.w, sortRules))
-                .ThenBy(t => t.i)
-                .Select(t => t.w);
-        }
+        // 2. Unpinned windows flow into the remaining numbers in MRU order.
+        var ordered = rest;
         var free = new Queue<int>(Enumerable.Range(1, 10).Where(s => !slotMap.ContainsKey(s)));
         var overflow = new List<WindowEntry>();
         foreach (var w in ordered)
@@ -494,27 +443,6 @@ public sealed class SwitcherController
             result.Add(new SlotWindow(w, -1, false));
         return result;
     }
-
-    /// <summary>Index of the first smart-sort rule matching the window, or
-    /// MaxValue when no rule does (they trail in MRU order).</summary>
-    private static int RuleIndex(WindowEntry w, IReadOnlyList<SortRule> rules)
-    {
-        for (var i = 0; i < rules.Count; i++)
-            if (RuleMatches(w, rules[i])) return i;
-        return int.MaxValue;
-    }
-
-    /// <summary>Generic structural matching (通用过滤): process name contains,
-    /// module path contains, title contains, or exact group key. No
-    /// app-specific logic lives in code — only in the user's settings.</summary>
-    public static bool RuleMatches(WindowEntry w, SortRule r) => r.Type switch
-    {
-        "process" => w.ProcessName.Contains(r.Value, StringComparison.OrdinalIgnoreCase),
-        "path" => w.ModulePath.Contains(r.Value, StringComparison.OrdinalIgnoreCase),
-        "title" => w.Title.Contains(r.Value, StringComparison.OrdinalIgnoreCase),
-        "group" => string.Equals(w.GroupKey, r.Value, StringComparison.OrdinalIgnoreCase),
-        _ => false,
-    };
 
     /// <summary>Pin/unpin: pinning freezes the window's current number (or
     /// assigns the lowest free one if it was unmanaged); unpinning lets it
@@ -895,25 +823,6 @@ public sealed class SwitcherController
         if (n == 0) return;
         ActiveFlatIndex = ((index % n) + n) % n;
         StateChanged?.Invoke();
-    }
-
-    /// <summary>导出: snapshot the current slot layout (slots 1..10) into
-    /// the settings store as a new template. Same-name templates are replaced.</summary>
-    public int ExportCurrentAsTemplate(string name)
-    {
-        var slots = new List<TemplateSlot>();
-        foreach (var sw in Slotted)
-        {
-            if (sw.IsCurrentCopy) continue; // 复制卡不进模板
-            if (sw.Slot < 1 || sw.Slot > 10) continue;
-            slots.Add(new TemplateSlot { Slot = sw.Slot, GroupKey = sw.Entry.GroupKey, Title = sw.Entry.Title });
-        }
-        _config.Templates.RemoveAll(t => t.Name == name);
-        _config.Templates.Add(new TemplateDefinition { Name = name, Slots = slots });
-        _configStore?.Save(_config);
-        WindowSwitcherWpf.Services.Log.Info("Controller",
-            $"exported template '{name}' slots={slots.Count}");
-        return slots.Count;
     }
 
     public bool SelectByDigit(int digit)

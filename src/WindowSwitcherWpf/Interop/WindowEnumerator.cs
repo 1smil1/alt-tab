@@ -38,25 +38,7 @@ public sealed class WindowEnumerator
             var p2 = p;
             valid.Add((hwnd, title, p2));
         }
-        // Log the rejected windows so we can see which real apps are
-        // being dropped and tune the filter.
-        foreach (var hwnd in hwnds)
-        {
-            if (valid.Any(v => v.hwnd == hwnd)) continue;
-            var t = GetWindowText(hwnd);
-            if (string.IsNullOrEmpty(t)) continue;
-            var pid = GetWindowThreadProcessId(hwnd, out var p);
-            var modulePath = GetModulePath(pid) ?? string.Empty;
-            var proc = System.IO.Path.GetFileName(modulePath);
-            var exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-            var style = GetWindowLongPtr(hwnd, GWL_STYLE);
-            var owner = GetWindow(hwnd, GW_OWNER);
-            var reason = IsEligible(hwnd, onlyCurrentDesktop)
-                ? (owner != IntPtr.Zero ? "has-owner" : (string.IsNullOrEmpty(t) ? "no-title" : "unknown"))
-                : DiagnoseReject(hwnd, onlyCurrentDesktop);
-            WindowSwitcherWpf.Services.Log.Verbose("Enumerator",
-                $"rejected: 0x{hwnd.ToInt64():X} reason={reason} ex=0x{exStyle.ToInt64():X} st=0x{style.ToInt64():X} owner=0x{owner.ToInt64():X} '{t}' [{proc}]");
-        }
+
         // No per-PID dedup. Native Alt+Tab shows every real top-level
         // window of a process, even when a process has many of them
         // (Chrome tabs, File Explorer windows, etc.). Background

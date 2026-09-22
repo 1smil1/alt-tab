@@ -137,7 +137,6 @@ public partial class SwitcherOverlay : Window
         {
             _controller.OpenOverlay();
             Rebuild();
-            RefreshHeaderUI();
             try
             {
                 Show();
@@ -244,83 +243,7 @@ public partial class SwitcherOverlay : Window
 
     private void Rebuild() => RebuildFromSlots(preserveScroll: false);
 
-    // ---------- Header UI (右上角: 模板 / 智能排序 / 导出) ----------
 
-    private bool _headerBusy; // guards SelectionChanged during programmatic fill
-
-    /// <summary>Fill the template/sort combos from config.json. Keeps the
-    /// previous selection when the lists still contain it.</summary>
-    private void RefreshHeaderUI()
-    {
-        var cfg = _controller.Config;
-        _headerBusy = true;
-        try
-        {
-            TemplateCombo.Items.Clear();
-            foreach (var t in cfg.Templates) TemplateCombo.Items.Add(t.Name);
-            if (TemplateCombo.Items.Count > 0) TemplateCombo.SelectedIndex = 0;
-
-            SortCombo.Items.Clear();
-            foreach (var m in cfg.SortMethods) SortCombo.Items.Add(m.Name);
-            if (SortCombo.Items.Count > 0) SortCombo.SelectedIndex = -1;
-        }
-        finally
-        {
-            _headerBusy = false;
-        }
-    }
-
-    private void OnTemplateSelected(object sender, SelectionChangedEventArgs e)
-    {
-        if (_headerBusy || TemplateCombo.SelectedIndex < 0) return;
-        var name = TemplateCombo.SelectedItem as string;
-        var template = _controller.Config.Templates.Find(t => t.Name == name);
-        if (template is null) return;
-        WindowSwitcherWpf.Services.Log.Info("Overlay", $"template pick '{name}'");
-        _controller.ApplyTemplate(template);
-        RebuildFromSlots(preserveScroll: true);
-    }
-
-    private void OnSortSelected(object sender, SelectionChangedEventArgs e)
-    {
-        if (_headerBusy || SortCombo.SelectedIndex < 0) return;
-        ApplySelectedSort();
-    }
-
-    private void OnSortApply(object sender, RoutedEventArgs e)
-    {
-        if (SortCombo.SelectedIndex < 0)
-        {
-            SortCombo.SelectedIndex = 0;
-            return;
-        }
-        ApplySelectedSort();
-    }
-
-    private void ApplySelectedSort()
-    {
-        var name = SortCombo.SelectedItem as string;
-        var method = _controller.Config.SortMethods.Find(m => m.Name == name);
-        if (method is null) return;
-        WindowSwitcherWpf.Services.Log.Info("Overlay", $"smart sort pick '{name}'");
-        _controller.ApplySmartSort(method);
-        RebuildFromSlots(preserveScroll: true);
-    }
-
-    private void OnExportClick(object sender, RoutedEventArgs e)
-    {
-        var name = "导出-" + DateTime.Now.ToString("yyyyMMdd-HHmm");
-        var n = _controller.ExportCurrentAsTemplate(name);
-        RefreshHeaderUI();
-        // Point the combo at what we just exported so re-applying is easy.
-        var idx = -1;
-        for (var i = 0; i < TemplateCombo.Items.Count; i++)
-            if ((string)TemplateCombo.Items[i] == name) { idx = i; break; }
-        _headerBusy = true;
-        TemplateCombo.SelectedIndex = idx;
-        _headerBusy = false;
-        WindowSwitcherWpf.Services.Log.Info("Overlay", $"export '{name}' slots={n}");
-    }
 
     public event Action? SettingsRequested;
 
@@ -423,7 +346,7 @@ public partial class SwitcherOverlay : Window
                 DispatcherPriority.Loaded);
     }
 
-    /// <summary>Main page header (模板/排序) vs sub view header (堆叠标题 +
+    /// <summary>Main page header (设置入口) vs sub view header (堆叠标题 +
     /// 操作提示) — only one is visible at a time.</summary>
     private void UpdateHeaderForView()
     {

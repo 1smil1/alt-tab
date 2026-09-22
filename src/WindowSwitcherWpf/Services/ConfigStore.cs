@@ -79,7 +79,7 @@ public sealed class ConfigStore
             cfg.SecondHotkey ??= dft.SecondHotkey;
             cfg.QuickJumpModifier ??= dft.QuickJumpModifier;
             cfg.AutoStart ??= dft.AutoStart;
-            Log.Info("Config", $"loaded config: templates={cfg.Templates.Count} sortMethods={cfg.SortMethods.Count}");
+            Log.Info("Config", "loaded config.json");
             return cfg;
         }
         catch (Exception ex)
@@ -102,9 +102,8 @@ public sealed class ConfigStore
         }
     }
 
-    /// <summary>Fresh-install defaults: hotkeys only. Templates and smart
-    /// sort methods start empty — they are added via the Settings window
-    /// (示例条目是手编时代的产物; 设置窗口时代默认从零开始).</summary>
+    /// <summary>Fresh-install defaults: hotkeys + 自启动. 模板/智能排序
+    /// 已随功能删除; 旧 config.json 里的残留字段反序列化时被忽略.</summary>
     public static ConfigFile DefaultConfig() => new()
     {
         Hotkey = "Alt+Tab",

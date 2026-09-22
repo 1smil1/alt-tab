@@ -64,6 +64,11 @@ public partial class App : Application
             Log.Exception("TaskScheduler", args.Exception);
             args.SetObserved();
         };
+        // ProcessExit 兜底 OnExit 覆盖不到的 CLR 关闭路径 (Environment.Exit
+        // 直调 / 主线程异常绕过 Dispatcher). 外部 TerminateProcess 依然无
+        // log — OS 不给机会, 只能靠 "log 戛然而止" 间接判断.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            Log.Info("App", $"process exit pid={System.Diagnostics.Process.GetCurrentProcess().Id}");
         // Dispatcher hook 的 native 异常 (DWM / DWM thumb / SetWindowComposition
         // 抛 SEH): catch 在我们的处理函数外 — 没接住就是直接终止.
         // 上面三层没接到的, OS 直接终止 → 我们看不到 log, 但能间接判断:
@@ -313,7 +318,7 @@ public partial class App : Application
 
     /// <summary>⚙: 收起 overlay → 按需 new 设置窗口 (关闭即回收, 空闲零
     /// 常驻). 保存回调 = 热生效: hook 重读热键配置 + controller 重载
-    /// config (模板/排序下拉即时刷新).</summary>
+    /// config (热键字段即时刷新).</summary>
     private void OnSettingsRequested()
     {
         Log.Info("App", "OnSettingsRequested");
@@ -454,9 +459,10 @@ public partial class App : Application
         _overlay?.Commit();
         _mouse?.ClearOwnerHwnd();
         _keyboard?.SetOverlayOpen(false);
-        // commit 后 SetForegroundWindow 切到别进程, OS 可能禁用我们的 LL
-        // hook (用户实测: 1次系统的, 1次我们的交替) → 强制重装让回调重被调.
-        _keyboard?.Reinstall();
+        // NB: 曾经在这里 Reinstall() 钩子治 "系统切换器交替冒出" — 已删.
+        // Reinstall 的 Dispose+Install 在 UI 线程 _ready.Wait(2000), 且重装
+        // 期间有无钩子窗口期: commit 后马上再按 Alt+Tab 没反应 (用户反馈).
+        // 交替问题的真根因已由专用泵线程 + 用户调 UAC 后解决, 不需要重装.
     }
 
     private void OnOverlayCancel()
@@ -884,18 +890,13 @@ public partial class App : Application
         Environment.Exit(0);
     }
 
+
     /// <summary>
-    /// Self-test for the config/template/smart-sort engine. Run via
+    /// Self-test for the config engine (hotkey parsing). Run via
     /// <c>WindowSwitcherWpf.exe --test-config</c>; prints PASS/FAIL lines.
-    /// Exercises generic rule matching, template→pin conversion and the
-    /// three-tier AssignSlots (pins &gt; smart rules &gt; MRU) — no real
-    /// config.json is touched.
     /// </summary>
     private void RunConfigTests()
     {
-        static WindowEntry W(string title, string process, string path, string group) =>
-            new(new IntPtr(title.GetHashCode() & 0xFFFFFF), title, process, path, group, false);
-
         static void Check(string name, bool ok, string detail = "")
         {
             var line = $"{(ok ? "PASS" : "FAIL")} {name}{(detail.Length > 0 ? " | " + detail : "")}";
@@ -903,79 +904,7 @@ public partial class App : Application
             WindowSwitcherWpf.Services.Log.Info("ConfigTests", line);
         }
 
-        // 1. Generic rule matching (通用过滤 — structural, not by app name).
-        var wTerm = W("term", "WindowsTerminal", @"C:\tools\wt.exe", "C:\\tools\\wt.exe");
-        Check("rule-process",
-            SwitcherController.RuleMatches(wTerm, new SortRule { Type = "process", Value = "terminal" }));
-        Check("rule-path",
-            SwitcherController.RuleMatches(wTerm, new SortRule { Type = "path", Value = "tools" }));
-        Check("rule-title-nomatch",
-            !SwitcherController.RuleMatches(wTerm, new SortRule { Type = "title", Value = "chrome" }));
-
-        // 2. Smart sort tier: rules reorder unpinned flow BEFORE MRU.
-        var term = W("term", "WindowsTerminal", @"C:\tools\wt.exe", "g:term");
-        var chrome = W("web", "chrome", @"C:\web\chrome.exe", "g:chrome");
-        var misc = W("misc", "miscapp", @"C:\x\misc.exe", "g:misc");
-        var rules = new List<SortRule>
-        {
-            new() { Type = "process", Value = "chrome" },
-        };
-        var mru = new List<WindowEntry> { term, misc, chrome };
-        var s2 = SwitcherController.AssignSlots(mru, new List<PinDefinition>(), rules);
-        // chrome (rule 0) must claim slot 1 even though it is LAST in MRU.
-        Check("smart-sort-rule-beats-mru",
-            s2[1].Entry.Title == "web" && s2[2].Entry.Title == "misc",
-            string.Join(',', s2.Select(x => $"{x.Entry.Title}:{x.Slot}")));
-
-        // 3. Pins outrank smart rules (固定 tier is never reordered).
-        var pinC = new PinDefinition("g:misc", "misc", 1);
-        var s3 = SwitcherController.AssignSlots(mru, new List<PinDefinition> { pinC }, rules);
-        Check("pins-beat-rules",
-            s3.First(x => x.Entry.Title == "misc").Slot == 1
-            && s3.First(x => x.Entry.Title == "misc").IsPinned,
-            string.Join(',', s3.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
-
-        // 4. Config round-trip through an isolated temp store.
-        try
-        {
-            var dir = Path.Combine(Path.GetTempPath(), "wsw-config-test-" + Guid.NewGuid().ToString("N"));
-            var cfgPath = Path.Combine(dir, "config.json");
-            var cfg = new ConfigFile
-            {
-                Templates = new List<TemplateDefinition>
-                {
-                    new()
-                    {
-                        Name = "t1",
-                        Slots = new List<TemplateSlot>
-                        {
-                            new() { Slot = 2, GroupKey = "g:term", Title = "term" },
-                        },
-                    },
-                },
-                SortMethods = new List<SortMethodDefinition>
-                {
-                    new() { Name = "m1", Rules = new List<SortRule> { new() { Type = "process", Value = "x" } } },
-                },
-            };
-            Directory.CreateDirectory(dir);
-            var json = System.Text.Json.JsonSerializer.Serialize(cfg);
-            System.IO.File.WriteAllText(cfgPath, json);
-            var loaded = System.Text.Json.JsonSerializer.Deserialize<ConfigFile>(
-                System.IO.File.ReadAllText(cfgPath));
-            var ok = loaded is not null
-                && loaded.Templates.Count == 1
-                && loaded.Templates[0].Slots[0].Slot == 2
-                && loaded.SortMethods[0].Rules[0].Type == "process";
-            Check("config-roundtrip", ok, cfgPath);
-            Directory.Delete(dir, recursive: true);
-        }
-        catch (Exception ex)
-        {
-            Check("config-roundtrip", false, ex.Message);
-        }
-
-        // 5. HotkeyParser: hotkey strings → VK + 自动拦截规则.
+        // HotkeyParser: hotkey strings → VK + 自动拦截规则.
         Check("hotkey-parse-backtick",
             HotkeyParser.TryParseKey("Alt+`", out var hk1) && hk1 == 0xC0);
         Check("hotkey-parse-tab",
