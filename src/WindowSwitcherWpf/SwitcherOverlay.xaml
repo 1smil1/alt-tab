@@ -60,12 +60,26 @@
                            VerticalAlignment="Center"
                            Margin="10,0,0,0"/>
             </StackPanel>
-            <!-- Header (右上角): 只剩设置入口 (模板/智能排序/导出已删). -->
+            <!-- Header (右上角): 状态提示 + 编辑 + 设置入口. -->
             <StackPanel x:Name="MainHeader"
                         Grid.Row="0"
                         HorizontalAlignment="Right"
                         Orientation="Horizontal"
                         Margin="0,0,0,10">
+                <TextBlock x:Name="StatusText"
+                           FontSize="11"
+                           Foreground="#FFB45309"
+                           VerticalAlignment="Center"
+                           MaxWidth="460"
+                           Margin="0,0,10,0"
+                           TextTrimming="CharacterEllipsis"
+                           Visibility="Collapsed"/>
+                <Button x:Name="EditButton"
+                        Content="✎ 编辑"
+                        FontSize="12"
+                        Padding="8,2"
+                        ToolTip="编辑模式：随意拖拽排序（落下即固定）· 点数字设快捷键 · 点面板外关闭并保存"
+                        Click="OnEditClick"/>
                 <Button x:Name="SettingsButton"
                         Content="⚙ 设置"
                         FontSize="12"
@@ -164,7 +178,9 @@
                                                 Margin="0,0,5,0"
                                                 VerticalAlignment="Center"
                                                 Visibility="{Binding BadgeVisibility}"
-                                                ToolTip="Alt+数字 直达此标签">
+                                                MouseLeftButtonDown="OnToolDown"
+                                                MouseLeftButtonUp="OnBadgeClick"
+                                                ToolTip="位置号(快捷号) · 编辑模式下点这里改快捷号">
                                             <TextBlock Text="{Binding BadgeText}"
                                                        FontSize="10"
                                                        FontWeight="Bold"

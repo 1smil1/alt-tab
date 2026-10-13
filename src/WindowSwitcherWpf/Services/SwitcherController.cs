@@ -765,7 +765,8 @@ public sealed class SwitcherController
         var to = list.FindIndex(s => s.Entry.Hwnd == targetHwnd);
         if (from < 0 || to < 0) return false;
 
-        // 拖固定卡 = 取消固定 (含它这个 stack 的成员 pin)
+        // 固定规则先解除 (含它这个 stack 的成员 pin), 落点再重新固定 —
+// 等价于"把这个 pin 挪到新位置".
         var moving = list[from];
         var pin = moving.IsPinned
             ? _order.Pins.FirstOrDefault(p => p.MemberTitle is null
@@ -777,10 +778,12 @@ public sealed class SwitcherController
         Slotted = moved;
         _flat = moved.Select(s => s.Entry).ToList();
 
-        // 自动固定在落点编号 (没有固定就不能跨会话留存顺序)
+        // 自动固定在落点编号 (没有固定就不能跨会话留存顺序). 拖过的卡一律
+        // 重新固定 —— 用户要的正是"拖完就有固定框", 拖固定卡 = 把那个 pin
+        // 挪到新位置, 想真取消固定点 📌.
         var landed = Slotted.FirstOrDefault(s => s.Entry.Hwnd == movingHwnd
             && !s.IsCurrentCopy && !s.IsSlot0Copy && s.Slot is >= 1 and <= 10);
-        if (landed is not null && pin is null
+        if (landed is not null
             && !Slotted.Any(s => s.Entry.Hwnd == movingHwnd && s.IsPinned))
         {
             PinHeadCore(landed);

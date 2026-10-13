@@ -454,6 +454,13 @@ public partial class App : Application
 
     private void OnOverlayCommit()
     {
+        // 编辑模式: 整个 handler 空转 (不只是 Commit) — 松 Alt 不能关面板,
+        // 也不能清 overlay-open 状态, 否则点面板外就关不掉了.
+        if (_overlay is { EditMode: true })
+        {
+            Log.Info("App", "edit mode: alt-up 不提交");
+            return;
+        }
         Log.Info("App", "OnOverlayCommit");
         // overlay.Commit() activates the selection exactly once (it guards
         // on _isOpen); calling _controller.Commit() here too made EVERY
@@ -490,6 +497,19 @@ public partial class App : Application
 
     private void OnOverlayEscape()
     {
+        // Esc 阶梯 (从最临时到最持久): 待定角标编辑 → 编辑模式 → 子页面 → 关闭.
+        if (_overlay is { QuickEditPending: true })
+        {
+            Log.Info("App", "OnOverlayEscape: cancel quick-number edit");
+            _overlay.CancelQuickEdit();
+            return;
+        }
+        if (_overlay is { EditMode: true })
+        {
+            Log.Info("App", "OnOverlayEscape: leave edit mode");
+            _overlay.ToggleEditMode();
+            return;
+        }
         // Esc in the stack sub view just steps back to the main page; the
         // overlay stays open and Alt stays armed.
         if (_overlay is { IsInStackView: true })
@@ -499,6 +519,8 @@ public partial class App : Application
             return;
         }
         OnOverlayCancel();
+        // 编辑模式: 点面板外关闭 = 编辑结束, 每步改动已 SaveDebounced 落盘.
+        Log.Info("App", "overlay closed (edit-mode changes already saved)");
     }
 
     private void RunDebugEnum()

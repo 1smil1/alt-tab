@@ -192,7 +192,7 @@ public partial class SwitcherOverlay : Window
 
     public void Commit()
     {
-        if (!_isOpen) return;
+        if (!_isOpen || EditMode) return; // 编辑模式: 松 Alt 不提交
         _thumbTimer.Stop();
         _controller.Commit();
         UnregisterLiveThumbnails();
@@ -207,8 +207,142 @@ public partial class SwitcherOverlay : Window
         _thumbTimer.Stop();
         UnregisterLiveThumbnails();
         _isOpen = false;
+        if (EditMode)
+        {
+            // 点面板外关闭 = 编辑模式结束. 每一步改动都已 SaveDebounced,
+            // 这里不需要额外落盘.
+            ToggleEditMode();
+        }
         Hide();
         EnterIdleMode();
+    }
+
+    // ---------- 编辑模式 (拖拽排序 / 设快捷键号) ----------
+
+    /// <summary>编辑模式: 位置规则全解除, 可随意拖拽与改号. 不持久化 —
+    /// 关掉面板即退出. App 层在 OnOverlayCommit 里整体空转, 松 Alt 不关
+    /// 面板 (等价于第二热键的常驻面板).</summary>
+    public bool EditMode { get; private set; }
+
+    /// <summary>正在等用户按数字键给某张卡设快捷号 (点角标后).</summary>
+    public bool QuickEditPending => _quickEditHwnd != IntPtr.Zero;
+
+    private void OnEditClick(object sender, RoutedEventArgs e) => ToggleEditMode();
+
+    public void ToggleEditMode()
+    {
+        EditMode = !EditMode;
+        if (EditMode)
+        {
+            if (_controller.IsInStackView) ExitStackView(); // 子页面没有位置概念
+            EditButton.Content = "✓ 完成";
+            ShowStatus("编辑模式：拖拽排序（落下即固定）· 点数字设快捷键 · 点面板外关闭并保存");
+        }
+        else
+        {
+            EditButton.Content = "✎ 编辑";
+            ClearQuickEditPending();
+            ShowStatus("");
+        }
+        RebuildFromSlots(preserveScroll: true);
+    }
+
+    private readonly DispatcherTimer _statusTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(4500),
+    };
+
+    private void ShowStatus(string msg, int ms = 4500)
+    {
+        StatusText.Text = msg;
+        StatusText.Visibility = msg.Length == 0
+            ? Visibility.Collapsed : Visibility.Visible;
+        _statusTimer.Stop();
+        if (msg.Length > 0)
+        {
+            _statusTimer.Interval = TimeSpan.FromMilliseconds(ms);
+            _statusTimer.Tick += OnStatusTick;
+            _statusTimer.Start();
+        }
+    }
+
+    private void OnStatusTick(object? sender, EventArgs e)
+    {
+        _statusTimer.Stop();
+        _statusTimer.Tick -= OnStatusTick;
+        if (!EditMode) ShowStatus("");
+    }
+
+    // ---------- 角标改快捷号 (点角标 → 按数字) ----------
+    // 状态存 hwnd 不存 OverlayWindow 实例: RebuildFromSlots 每次全量重建,
+    // 存实例下一次就失效了.
+    private IntPtr _quickEditHwnd;
+    private int? _quickEditOriginal;
+
+    private void OnBadgeClick(object sender, MouseButtonEventArgs e)
+    {
+        if (!EditMode || _controller.IsInStackView) return;
+        if (sender is not FrameworkElement { DataContext: OverlayWindow ow }) return;
+        if (ow.IsCurrentCopy) return; // 副本卡没有自己的号码
+        ClearQuickEditPending();
+        _quickEditHwnd = ow.Hwnd;
+        // 原值 = 显式指派; 跟位置号相同时 AssignQuick 不会落表, 所以回落即 null.
+        var sw = _controller.Slotted.FirstOrDefault(
+            s => s.Entry.Hwnd == ow.Hwnd && !s.IsCurrentCopy);
+        _quickEditOriginal = sw is not null && _controller.QuickNumberFor(sw) is var q
+            && q != sw.Slot ? q : null;
+        ShowStatus("输入数字设快捷号 (0=10) · Enter 确认 · Esc 取消", 8000);
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"quick edit start '{ow.DisplayTitle}' hwnd=0x{ow.Hwnd.ToInt64():X}");
+        e.Handled = true;
+    }
+
+    private void ClearQuickEditPending()
+    {
+        _quickEditHwnd = IntPtr.Zero;
+        _quickEditOriginal = null;
+    }
+
+    /// <summary>角标编辑中按了数字: 这颗数字是**快捷号**而非位置号.
+    /// 立即落盘 (无待定态), 冲突则顶掉旧指派并红闪提示.</summary>
+    private void ApplyPendingQuickNumber(int digit)
+    {
+        var hwnd = _quickEditHwnd;
+        ClearQuickEditPending();
+        var n = SwitcherController.NumberForKey(digit);
+        var stolen = _controller.SetQuickNumber(hwnd, n);
+        ShowStatus(stolen is { Length: > 0 } t
+            ? $"快捷号 {n} —「{t}」的原号码已让出"
+            : $"快捷号 = {n} (面板关闭后 Alt+{SwitcherController.KeyForNumber(n)} 直达)", 6000);
+        if (stolen is { Length: > 0 })
+        {
+            // 旧指派那张卡红闪一下 — 复用已有的 FlashPin, 不新增视觉机制.
+            var victim = _windows.FirstOrDefault(w => w.Title == stolen)?.Hwnd ?? IntPtr.Zero;
+            if (victim != IntPtr.Zero) Dispatcher.BeginInvoke(
+                new Action(() => FlashPin(victim)), DispatcherPriority.Loaded);
+        }
+        RebuildFromSlots(preserveScroll: true);
+    }
+
+    /// <summary>Enter: 没有输入数字时按原值收工 (等价确认).</summary>
+    public void ConfirmQuickEdit()
+    {
+        if (!QuickEditPending) return;
+        ClearQuickEditPending();
+        ShowStatus(EditMode ? "编辑模式：拖拽排序（落下即固定）· 点数字设快捷键 · 点面板外关闭并保存" : "");
+    }
+
+    /// <summary>Esc: 撤销这次角标编辑 (还没输数字就只是退出待定态).</summary>
+    public void CancelQuickEdit()
+    {
+        if (!QuickEditPending) return;
+        var hwnd = _quickEditHwnd;
+        var orig = _quickEditOriginal;
+        ClearQuickEditPending();
+        if (orig is { } n) _controller.SetQuickNumber(hwnd, n);
+        else _controller.ClearQuickNumber(hwnd);
+        ShowStatus(EditMode ? "已取消" : "", 2000);
+        RebuildFromSlots(preserveScroll: true);
     }
 
     // Tray-app memory discipline: the overlay just did its bitmap burst;
@@ -371,6 +505,16 @@ public partial class SwitcherOverlay : Window
     public void SelectSlotAndCommit(int digit)
     {
         if (!_isOpen) return;
+        // 1) 点角标后的待定输入: 这颗数字是快捷号, 不是位置号.
+        if (QuickEditPending) { ApplyPendingQuickNumber(digit); return; }
+        // 2) 编辑模式: 数字仍按**位置号**寻址 (与面板外 Alt+数字 相反),
+        //    但只选中不提交.
+        if (EditMode)
+        {
+            _controller.SelectByDigit(digit);
+            RebuildSelection();
+            return;
+        }
         if (_controller.IsInStackView)
         {
             // Relative member index (相对数字不显示但有效): Alt+2 = 第2个成员.
@@ -2001,6 +2145,14 @@ public partial class SwitcherOverlay : Window
         if (_dragActive) return;
         if (sender is FrameworkElement fe && fe.DataContext is OverlayWindow ow)
         {
+            if (EditMode)
+            {
+                // 编辑模式: 点卡只选中 (看边框/状态), 不切窗口.
+                _controller.SelectByHwnd(ow.Hwnd);
+                RebuildSelection();
+                e.Handled = true;
+                return;
+            }
             // The controller's selection must follow the mouse, otherwise
             // Commit() would activate the keyboard-selected window instead.
             if (_controller.SelectByHwnd(ow.Hwnd)) Commit();
@@ -2020,10 +2172,16 @@ public partial class SwitcherOverlay : Window
     private bool _dragFromFanStrip;
     private FrameworkElement? _captureElt;
 
-    private bool CanDrag(OverlayWindow ow) =>
-        !ow.IsCurrentCopy // 复制卡是纯展示卡 (真实卡留在原位)
-        && !_controller.IsMemberPinned(ow.Hwnd)
-        && (_controller.IsInStackView || (ow.SlotBadge != "0" && !ow.IsPinned));
+    private bool CanDrag(OverlayWindow ow)
+    {
+        // 副本卡 (-2 当前窗口 / 0 号副本) 是同 hwnd 真身的别名, 拖它会按
+        // hwnd 解析到另一张卡 — 编辑模式内外都不可拖.
+        if (ow.IsCurrentCopy || ow.IsSlot0Copy) return false;
+        // 编辑模式: 固定规则全解除 (拖固定卡 = 取消固定), 主页面任意卡可拖.
+        if (EditMode) return !_controller.IsInStackView;
+        return !_controller.IsMemberPinned(ow.Hwnd)
+            && (_controller.IsInStackView || (ow.SlotBadge != "0" && !ow.IsPinned));
+    }
 
     /// <summary>Pin/close presses must not arm the card drag.</summary>
     private void OnToolDown(object sender, MouseButtonEventArgs e) => e.Handled = true;
@@ -2090,8 +2248,9 @@ public partial class SwitcherOverlay : Window
         // pointer. The head card's left 25% stays the reorder band (move
         // the dragged card before the whole cascade); dropping a head on
         // its own stack is a no-op via the same-member guard. Sub view has
-        // no cascades — skip there.
-        if (!_controller.IsInStackView && CascadeAt(p) is { } c)
+        // no cascades — skip there. 编辑模式下一律重排 (不识别堆叠区),
+        // 否则会把拖拽变成"集中", 用户明明在排序.
+        if (!_controller.IsInStackView && !EditMode && CascadeAt(p) is { } c)
         {
             var ctl = c.headCard.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var relX = p.X - ctl.X;
@@ -2120,7 +2279,13 @@ public partial class SwitcherOverlay : Window
             var pos = card.TransformToVisual(WindowsList).Transform(new Point(0, 0));
             var rel = (p.X - pos.X) / Math.Max(card.ActualWidth, 1);
             bool movedT;
-            if (_controller.IsInStackView)
+            if (EditMode)
+            {
+                // 编辑模式: 整张卡就是排序区 — 左半插前, 右半插后. 拖固定卡
+                // = 取消固定, 落下即在新位置自动固定 (MoveRelativeEdit 内).
+                movedT = _controller.MoveRelativeEdit(dragHwnd, target.Hwnd, before: rel < 0.5);
+            }
+            else if (_controller.IsInStackView)
             {
                 // Sub view: every card is a member of the same stack, so any
                 // card drop reorders members (StackDropCore's same-stack
@@ -2153,7 +2318,9 @@ public partial class SwitcherOverlay : Window
         if (drop is not { } d) return;
         var moved = _controller.IsInStackView
             ? _controller.StackDrop(dragHwnd, d.target, d.before) // member reorder
-            : _controller.MoveRelative(dragHwnd, d.target, d.before);
+            : EditMode
+                ? _controller.MoveRelativeEdit(dragHwnd, d.target, d.before)
+                : _controller.MoveRelative(dragHwnd, d.target, d.before);
         if (moved) RebuildFromSlots(preserveScroll: true);
     }
 
