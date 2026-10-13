@@ -534,7 +534,10 @@ public partial class SwitcherOverlay : Window
     {
         if (!_windows[cardIndex].SelectionGlow) return;
         if (WindowsList.ItemContainerGenerator.ContainerFromIndex(cardIndex) is not ContentPresenter cp) return;
-        if (WindowsList.ItemTemplate?.FindName("GlowRing", cp) is not Border glow) return;
+        // 模板根就是 GlowRing (DataTemplate 最外层 Border). 不用 FindName:
+        // 容器还在生成时 (Rebuild 早于 Show) FindName 会抛
+        // InvalidOperationException "此操作仅在应用此模板的元素上有效".
+        if (VisualTreeHelper.GetChild(cp, 0) is not Border glow) return;
         glow.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0,
             TimeSpan.FromMilliseconds(550))
         {
