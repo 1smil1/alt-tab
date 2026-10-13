@@ -491,21 +491,11 @@ public partial class SwitcherOverlay : Window
         var idx = Math.Min(_controller.ActiveFlatIndex, _windows.Count - 1);
         if (idx < 0) return;
         var target = _windows[idx];
-        // -2 复制卡永不显示选中外框 (用户: 复制的时候不要复制外框) — 改
-        // 画在同 hwnd 真身. 0号副本 (IsSlot0Copy) 例外: 它是 ActiveFlatIndex
-        // 直接停靠的卡, 0号 = 标签0 与 真身 = 标签1 共 hwnd 时按右键蓝框
-        // 从 0号副本 移到 真身 (用户: "你优先的是0窗口" — 用 hwnd 倒序匹配
-        // 同 hwnd 卡时永远先撞 0号副本, 蓝框锁死在 0号副本).
-        if (target.IsCurrentCopy)
-        {
-            for (var i = 0; i < _windows.Count; i++)
-                if (_windows[i].Hwnd == target.Hwnd && !_windows[i].IsCardCopy)
-                { _windows[i].IsSelected = true; break; }
-        }
-        else
-        {
-            target.IsSelected = true;
-        }
+        // 每张卡都是普通停靠点 — 蓝框画在停靠的那张卡本身. 之前把 -2
+        // 当前窗口副本特殊对待 (选中它却把框挪到同 hwnd 的真身), 结果
+        // 左箭头移到左上角那张时框不在这张卡上, 看起来"不可选"
+        // (用户: 方向键应该能移到这里).
+        target.IsSelected = true;
         ScrollSelectionIntoView();
     }
 
