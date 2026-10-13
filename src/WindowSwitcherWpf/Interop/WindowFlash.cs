@@ -72,27 +72,23 @@ public static class WindowFlash
             var ph = r.Bottom - r.Top;
             if (pw <= 0 || ph <= 0) return;
 
-            // 本进程 PerMonitorV2: GetWindowRect = 物理像素, WPF 窗口位置 = DIP.
-            // 目标窗口在别的显示器且缩放不是 100% 时, 不换算就会画飞.
-            var dpi = GetDpiForWindow(hwnd);
-            if (dpi == 0) dpi = 96;
-            var s = dpi / 96.0;
-
+            // 摆位置用 SetWindowPos (物理像素), 不用 WPF 的 Left/Top/DIP:
+            // WPF 窗口在多屏不同缩放下解释 Left/Top 的 DPI 上下文不稳定
+            // (刚创建时常按主屏 DPI), 副屏就会整体偏移, 甚至跑到屏幕 1.
+            // SetWindowPos 和 GetWindowRect 同一坐标系, 一次到位.
             var win = EnsureWindow();
             if (win is null) return;
-            win.Left = r.Left / s;
-            win.Top = r.Top / s;
-            win.Width = pw / s;
-            win.Height = ph / s;
             if (!win.IsVisible) win.Show();
-            // 置顶窗口的通用抬升法: 去掉再挂上, 保证压在刚激活的窗口之上.
-            win.Topmost = false;
-            win.Topmost = true;
+            var hwndFlash = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+            if (hwndFlash == IntPtr.Zero) return;
+            if (!SetWindowPos(hwndFlash, HWND_TOPMOST, r.Left, r.Top, pw, ph,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW))
+                Log.Warn("Flash", $"SetWindowPos failed err={Marshal.GetLastWin32Error()}");
 
             Start();
 
             Log.Info("Flash",
-                $"window glow 0x{hwnd.ToInt64():X} dwm={hr} px=({r.Left},{r.Top},{pw}x{ph}) dpi={dpi}");
+                $"window glow 0x{hwnd.ToInt64():X} dwm={hr} px=({r.Left},{r.Top},{pw}x{ph})");
         }
         catch (Exception ex)
         {

@@ -232,6 +232,18 @@ public static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
+    // 用物理像素直接摆窗口 — 和 GetWindowRect 同一套坐标系, 绕开 WPF
+    // 的 DIP <-> 物理像素换算 (多屏不同缩放时那个换算不可靠: WPF 窗口
+    // 刚创建时按主屏 DPI 解释 Left/Top, 副屏 125% 就整体偏移).
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_SHOWWINDOW = 0x0040;
+
     public const int SW_SHOWNOACTIVATE = 4;
     public const int SW_MINIMIZE = 6;
     public const int SW_SHOWMINNOACTIVE = 7;
