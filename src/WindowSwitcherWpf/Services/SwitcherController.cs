@@ -417,11 +417,17 @@ public sealed class SwitcherController
         if (mru.Count == 0) return result;
 
         // 当前窗口卡 (Windows Alt+Tab 左起第一张 = 你刚离开的窗口): 恒占
-        // index 0, Slot=-2 → badge 不显示数字. 真实卡保留在编号区 — pin 卡
-        // 双卡并存 (Alt+数字直达真实卡 = 激活当前窗口, 无害).
+        // index 0, Slot=-2 → badge 不显示数字. **只此一张**: 它不进编号区
+        // (用户: "当前窗口同时是 -1 和左上角, 只能留一个") —— 被固定了就由
+        // 这张卡带着它的固定号 (Slot=pin), 号照旧可达 (Alt+数字), 固定框
+        // 照旧亮, 编号区那个号空着.
         var fi = foreground != default ? mru.FindIndex(w => w.Hwnd == foreground) : -1;
-        if (fi >= 0)
-            result.Add(new SlotWindow(mru[fi], -2, false) { IsCurrentCopy = true });
+        var fgEntry = fi >= 0 ? mru[fi] : null;
+        var fgPin = fgEntry is null ? null : pins.FirstOrDefault(p => p.MemberTitle is null
+            && p.GroupKey == fgEntry.GroupKey && p.Title == fgEntry.Title);
+        if (fgEntry is not null)
+            result.Add(new SlotWindow(fgEntry, fgPin?.Slot ?? -2, fgPin is not null)
+                { IsCurrentCopy = true });
 
         // Slot 0 = 上一个窗口 = MRU 序列里 fg 之外的第一个 (quick tap 松开
         // 的提交目标). fg==mru[0] 时它就是 mru[1] — 0 号恒存在.
@@ -437,11 +443,11 @@ public sealed class SwitcherController
         var slot0Pinned = pins.Any(p => p.MemberTitle is null
             && p.GroupKey == slot0Entry.GroupKey && p.Title == slot0Entry.Title);
         result.Add(new SlotWindow(slot0Entry, 0, false) { IsSlot0Copy = slot0Pinned });
-        // 编号区候选 = mru 除 slot0 卡外的全部 (含 fg 真实卡 — pin 认领
-        // 依赖它, 双卡并存的关键); slot0 窗口已 pin 时同样留在候选里
-        // (真身). 不可拖拽: -2 复制卡 CanDrag 拒绝, Slot 0 卡 MoveRelative
-        // 拒绝.
-        var rest = mru.Where((w, i) => i != slot0 || slot0Pinned).ToList();
+        // 编号区候选 = mru 除 slot0 卡 (已 pin 时保留真身) 与 fg 之外的全部 ——
+        // fg 的卡已由 index 0 的当前窗口卡代表. 不可拖拽: -2 复制卡 CanDrag
+        // 拒绝, Slot 0 卡 MoveRelative 拒绝.
+        var rest = mru.Where((w, i) => (fgEntry is null || w.Hwnd != fgEntry.Hwnd)
+            && (i != slot0 || slot0Pinned)).ToList();
 
         // 1. Pins hard-claim their numbers (手动固定 tier;
         // smart sort NEVER moves them).
@@ -463,7 +469,9 @@ public sealed class SwitcherController
 
         // 2. Unpinned windows flow into the remaining numbers in MRU order.
         var ordered = rest;
-        var free = new Queue<int>(Enumerable.Range(1, 10).Where(s => !slotMap.ContainsKey(s)));
+        var fgSlot = fgPin?.Slot ?? -1; // fg 的 pin 由 index 0 那张卡带着, 别再发出去
+        var free = new Queue<int>(Enumerable.Range(1, 10)
+            .Where(s => !slotMap.ContainsKey(s) && s != fgSlot));
         var overflow = new List<WindowEntry>();
         foreach (var w in ordered)
         {
@@ -803,7 +811,11 @@ public sealed class SwitcherController
         var result = new List<SlotWindow>(list.Count);
         foreach (var s in list)
         {
-            if (s.IsCurrentCopy) result.Add(s with { Slot = -1, IsCurrentCopy = false });
+            if (s.IsCurrentCopy)
+                // 带固定号的当前窗口卡: 让位但保留号与固定框 (它是那张卡本身)
+                result.Add(s.Slot is >= 1 and <= 10
+                    ? s with { IsCurrentCopy = false }
+                    : s with { Slot = -1, IsCurrentCopy = false });
             else if (s.Slot == 0) result.Add(s with { Slot = -1, IsSlot0Copy = false });
             else result.Add(s);
         }
@@ -1076,7 +1088,9 @@ public sealed class SwitcherController
     {
         foreach (var sw in slots)
         {
-            if (sw.IsCurrentCopy) continue;
+            // 当前窗口卡只有在"没有号" (Slot=-2) 时不参与寻址; 它带着固定号
+            // 的时候就是一张正常的固定卡 (用户: 一个窗口只留一张卡).
+            if (sw.IsCurrentCopy && sw.Slot < 1) continue;
             foreach (var q in quicks)
                 if (q.GroupKey == sw.Entry.GroupKey && q.Title == sw.Entry.Title
                     && KeyForNumber(q.Number) == digit)
@@ -1084,7 +1098,7 @@ public sealed class SwitcherController
         }
         foreach (var sw in slots)
         {
-            if (sw.IsCurrentCopy) continue;
+            if (sw.IsCurrentCopy && sw.Slot < 1) continue;
             if (sw.Slot == digit) return sw.Entry.Hwnd;
         }
         return IntPtr.Zero;

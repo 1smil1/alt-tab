@@ -843,17 +843,19 @@ public partial class App : Application
             && SwitcherController.QuickCardHwnd(s23, q23, 7) == tail23.Entry.Hwnd,
             $"overflow '{tail23.Entry.Title}' quick=7");
 
-        // 24. 复制卡不参与寻址: 号码指派落在 -2 复制卡上也不该被它抢走.
+        // 24. 当前窗口只留一张卡 (左上角那张). 它被固定时由它带着固定号, 该号
+        //     照旧可达; 没固定 (Slot=-2) 时不参与寻址.
         var s24 = SwitcherController.AssignSlots(
-            new[] { "a", "b", "c", "d" }.Select(W).ToList(), new List<PinDefinition>(),
+            new[] { "a", "b", "c", "d" }.Select(W).ToList(),
+            new List<PinDefinition> { new("group:a", "a", 4) },
             W("a").Hwnd);
         var copy24 = s24.First(x => x.IsCurrentCopy);
-        var q24 = Q(("a", 4));
-        Check("quick-skips-current-copy",
-            copy24.IsCurrentCopy
-            && SwitcherController.QuickCardHwnd(s24, q24, 4)
-                == s24.First(x => x.Entry.Title == "a" && !x.IsCurrentCopy).Entry.Hwnd,
-            $"copy slot={copy24.Slot}, 命中真身卡");
+        Check("current-window-single-card-keeps-its-pin",
+            s24.Count(x => x.Entry.Title == "a") == 1
+            && copy24.Slot == 4 && copy24.IsPinned
+            && s24.All(x => x.Slot != 4 || x.IsCurrentCopy)
+            && SwitcherController.QuickCardHwnd(s24, Q(("a", 4)), 4) == W("a").Hwnd,
+            $"a 卡数={s24.Count(x => x.Entry.Title == "a")} slot={copy24.Slot}");
 
         // 25. 冲突互斥: B 抢 5 → A 的指派被清掉, 返回 A 供上层提示.
         var q25 = Q(("a", 5));
@@ -1010,6 +1012,17 @@ public partial class App : Application
             e38.First(x => x.Entry.Title == "c").Slot == 5
             && e38.First(x => x.Entry.Title == "c").IsPinned,
             string.Join(',', e38.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
+
+        // 39. 编辑布局下, 带固定号的当前窗口卡让位但保住号与固定.
+        var e39 = SwitcherController.EditLayout(new List<SlotWindow>
+        {
+            new(W("b"), 4, true) { IsCurrentCopy = true },
+            new(W("a"), 0, false),
+            new(W("c"), 1, false),
+        });
+        Check("edit-layout-keeps-current-window-pin",
+            e39.Count == 3 && !e39[0].IsCurrentCopy && e39[0].Slot == 4 && e39[0].IsPinned,
+            string.Join(',', e39.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
 
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
