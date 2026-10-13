@@ -51,8 +51,8 @@ public sealed class ConfigFile
     /// <summary>同上, 但只对固定标签生效. null = 跟随 QuickMinimizeOnSame.</summary>
     public bool? QuickMinimizePinnedOnSame { get; set; }
 
-    /// <summary>选中卡时外围闪一圈浅蓝光然后渐隐 (普通卡 / 堆叠头 /
-    /// 子页面成员都吃). null = 默认 true.</summary>
+    /// <summary>切到窗口后, 在那个窗口外框闪一圈蓝光然后马上消失 (最小化
+    /// 的窗口恢复上来那一刻也能看见). null = 默认 true.</summary>
     public bool? SelectionGlow { get; set; }
 }
 

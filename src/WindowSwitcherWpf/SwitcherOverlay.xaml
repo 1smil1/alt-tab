@@ -92,16 +92,6 @@
                              占位恒定, 选中 = thickness 0→4, padding+thickness
                              恒为 4 → Card 位置分毫不动); 黄框仍是 Card 自己
                              的 border (IsPinned trigger). -->
-                        <Border x:Name="GlowRing" IsHitTestVisible="False"
-                                BorderBrush="#FF9FD4FF"
-                                BorderThickness="3"
-                                CornerRadius="16"
-                                Opacity="0">
-                            <!-- 选中光晕: Opacity 由 RebuildSelection 用
-                                 BeginAnimation 驱动 (1→0 渐隐). 不能在 XAML 里
-                                 用 Setter + DoubleAnimation — DataTemplate 内
-                                 这么写会让 InitializeComponent 抛
-                                 FrameworkTemplate.Template 异常直接崩. -->
                         <Border x:Name="SelectionRing"
                                 Margin="2"
                                 Padding="4"
@@ -287,7 +277,6 @@
                                 </Border>
                             </StackPanel>
                             </Grid>
-                        </Border>
                         </Border>
                         </Border>
                     </DataTemplate>

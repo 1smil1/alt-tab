@@ -25,6 +25,10 @@ public static class ActivationService
             if (SetForegroundWindow(hwnd))
             {
                 WindowSwitcherWpf.Services.Log.Info("Activate", "SetForegroundWindow ok");
+                // 切到窗口后, 在那个窗口外框闪一圈蓝光 (config SelectionGlow,
+                // 默认开). 走 Dispatcher — 排在激活之后, 拿到的 rect 已是摆好
+                // 之后的最终位置.
+                WindowSwitcherWpf.Interop.WindowFlash.Flash(hwnd);
                 return true;
             }
             WindowSwitcherWpf.Services.Log.Warn("Activate",
@@ -32,6 +36,7 @@ public static class ActivationService
             System.Threading.Thread.Sleep(50);
             var ok = SetForegroundWindow(hwnd);
             WindowSwitcherWpf.Services.Log.Info("Activate", $"retry -> {ok}");
+            if (ok) WindowSwitcherWpf.Interop.WindowFlash.Flash(hwnd);
             return ok;
         }
         catch (Exception ex)

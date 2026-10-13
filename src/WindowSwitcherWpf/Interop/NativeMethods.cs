@@ -165,6 +165,13 @@ public static class NativeMethods
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
+    // 真实边框 (去掉最大化时那圈不可见的 resize border), 描边才和窗口对齐.
+    // EntryPoint 必须写全导出名 — P/Invoke 默认按方法名找, 找不到就抛。
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+    public static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int dwAttribute, out RECT rect, int cbAttribute);
+
+    public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
     [DllImport("dwmapi.dll")]
     public static extern int DwmRegisterThumbnail(IntPtr hwndDestination, IntPtr hwndSource, out IntPtr phThumbnailId);
 
@@ -213,6 +220,17 @@ public static class NativeMethods
     public const int DWMWA_CLOAKED = 14;
     public const int DWMWA_CLOAK = 13;
     public const int DWMWA_HAS_ICONIC_BITMAP = 10;
+
+    // 目标窗口所在显示器的 DPI (PerMonitorV2 进程里, GetWindowRect 给的是
+    // 物理像素, 而 WPF Left/Top/Width/Height 是 DIP — 换算必须用它)
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    // 目标窗口所在显示器 (用它的工作区把描边夹回屏幕内 — 最大化窗口的
+    // rect 会往屏幕外多出那圈 invisible resize border, 直接画就跑出屏幕).
+    // MONITORINFO / GetMonitorInfoW / MONITOR_DEFAULTTONEAREST 见文件末尾.
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
     public const int SW_SHOWNOACTIVATE = 4;
     public const int SW_MINIMIZE = 6;

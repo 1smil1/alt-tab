@@ -349,7 +349,6 @@ public partial class App : Application
         _controller?.ReloadConfig();      // 先刷新 controller 缓存 —
                                           // ApplyHotkeyConfig 读的就是它
         ApplyHotkeyConfig(_keyboard!);
-        _overlay?.RefreshGlowSetting(); // 选中光晕开关热生效 (卡已建, 不重建)
     }
 
     // ---------- 可配置热键 + 一次直达 (config.json → hook) ----------
@@ -388,6 +387,8 @@ public partial class App : Application
         }
         hook.QuickModifierVirtualKeys = HotkeyParser.ModifierKeys(
             _controller.Config.QuickJumpModifier);
+        // 切到窗口后的外框蓝光 (设置保存时同样热生效)
+        WindowFlash.Enabled = _controller.Config.SelectionGlow ?? true;
         hook.SuppressAltTabActive = _controller.Config.SuppressAltTab
             ?? HotkeyParser.IsAltTab(hotkey);
         Log.Info("App", $"suppressAltTab={hook.SuppressAltTabActive} " +

@@ -6,8 +6,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using WindowSwitcherWpf.Interop;
@@ -152,10 +150,6 @@ public partial class SwitcherOverlay : Window
             _isOpen = true;
             _thumbTimer.Start();
             CenterOnCursorMonitor();
-            // 初次 Rebuild 跑在 Show() 之前, 那时容器还没 realize, 光晕那次
-            // FlashSelectionGlow 直接跳过. Show 之后再刷一次 — 容器已就位,
-            // 开面板的第一下也有光晕.
-            RebuildSelection();
             // The Rebuild() above ran while _isOpen was still false, so its
             // thumbnail/cascade chain was skipped — schedule it now that the
             // window is shown and open (Loaded < ApplicationIdle, so these
@@ -269,7 +263,6 @@ public partial class SwitcherOverlay : Window
     {
         var offset = preserveScroll ? Scroller.VerticalOffset : 0.0;
         _windows.Clear();
-        var glow = _controller.Config.SelectionGlow ?? true;
         if (_controller.IsInStackView)
         {
             var info = _controller.ActiveStackInfo!;
@@ -284,7 +277,6 @@ public partial class SwitcherOverlay : Window
                     SlotBadge = RelativeMemberDigit(idx),
                     // 固定子标签在子页面同样亮黄框 (alt 3 进入看到同样语义).
                     IsPinned = _controller.IsMemberPinned(m.Hwnd),
-                    SelectionGlow = glow,
                 };
                 var cached = LookupCache(ow.Hwnd);
                 if (cached is not null)
@@ -305,7 +297,6 @@ public partial class SwitcherOverlay : Window
                     IsPinned = sw.IsPinned,
                     IsCurrentCopy = sw.IsCurrentCopy,
                     IsSlot0Copy = sw.IsSlot0Copy,
-                    SelectionGlow = glow,
                 };
                 var st = _controller.StackInfoFor(sw.Entry.Hwnd);
                 if (st is not null) ow.StackCount = st.Members.Count;
@@ -408,14 +399,6 @@ public partial class SwitcherOverlay : Window
     /// controller state (--show-overlay --enter-stack N screenshot flow).</summary>
     public void TestRebuild() => RebuildFromSlots(preserveScroll: false);
 
-    /// <summary>设置里改了"选中光晕"后热生效: 推给已建的卡, 不必重建
-    /// (重建会打断正在看的面板 + 重刷缩略图).</summary>
-    public void RefreshGlowSetting()
-    {
-        var glow = _controller.Config.SelectionGlow ?? true;
-        foreach (var w in _windows) w.SelectionGlow = glow;
-    }
-
     // Ground truth for scripted self-tests: the physical screen rect of
     // every card, so synthetic clicks can target pins without pixel
     // archaeology on screenshots.
@@ -513,44 +496,17 @@ public partial class SwitcherOverlay : Window
         // 直接停靠的卡, 0号 = 标签0 与 真身 = 标签1 共 hwnd 时按右键蓝框
         // 从 0号副本 移到 真身 (用户: "你优先的是0窗口" — 用 hwnd 倒序匹配
         // 同 hwnd 卡时永远先撞 0号副本, 蓝框锁死在 0号副本).
-        var selIdx = idx;
         if (target.IsCurrentCopy)
         {
-            selIdx = -1;
             for (var i = 0; i < _windows.Count; i++)
                 if (_windows[i].Hwnd == target.Hwnd && !_windows[i].IsCardCopy)
-                { _windows[i].IsSelected = true; selIdx = i; break; }
-            if (selIdx < 0) return;
+                { _windows[i].IsSelected = true; break; }
         }
         else
         {
             target.IsSelected = true;
         }
-        FlashSelectionGlow(selIdx);
         ScrollSelectionIntoView();
-    }
-
-    /// <summary>选中的卡外围闪一圈浅蓝光然后渐隐 (config SelectionGlow).
-    /// XAML 里不能用 Setter + DoubleAnimation (DataTemplate 内会让
-    /// InitializeComponent 抛 FrameworkTemplate.Template 异常崩), 所以
-    /// 在这里拿到 GlowRing 直接 BeginAnimation.</summary>
-    private void FlashSelectionGlow(int cardIndex)
-    {
-        if (!_windows[cardIndex].SelectionGlow) return;
-        if (WindowsList.ItemContainerGenerator.ContainerFromIndex(cardIndex) is not ContentPresenter cp) return;
-        // 模板根就是 GlowRing (DataTemplate 最外层 Border). 不用 FindName:
-        // 容器还在生成时 (Rebuild 早于 Show) FindName 会抛
-        // InvalidOperationException "此操作仅在应用此模板的元素上有效".
-        // GetChild 同理要先确认有子元素 — 未 realize 的容器 VisualChildCount=0,
-        // GetChild(0) 会抛 ArgumentOutOfRangeException. 这时跳过, 由 Show 之后
-        // 那次 RebuildSelection 补上 (容器已 realize).
-        if (VisualTreeHelper.GetChildrenCount(cp) == 0) return;
-        if (VisualTreeHelper.GetChild(cp, 0) is not Border glow) return;
-        glow.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0,
-            TimeSpan.FromMilliseconds(550))
-        {
-            FillBehavior = FillBehavior.HoldEnd,
-        });
     }
 
     // Keep the selected card visible when navigating with keys (native
@@ -2461,19 +2417,6 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     /// 真身) 靠它拿两个独立的 DWM 注册 — (hwnd, true)=副本, (hwnd, false)
     /// =真身.</summary>
     public bool IsCardCopy => IsCurrentCopy || IsSlot0Copy;
-    /// <summary>选中时外围浅蓝光 (config SelectionGlow, 默认开). 设置热改时
-    /// 由 RefreshGlowSetting 推给已建的卡.</summary>
-    private bool _selectionGlow = true;
-    public bool SelectionGlow
-    {
-        get => _selectionGlow;
-        set
-        {
-            if (_selectionGlow == value) return;
-            _selectionGlow = value;
-            PropertyChanged?.Invoke(this, new(nameof(SelectionGlow)));
-        }
-    }
     private bool _isSelected;
     public bool IsSelected
     {
