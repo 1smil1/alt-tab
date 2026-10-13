@@ -78,7 +78,7 @@
                         Content="✎ 编辑"
                         FontSize="12"
                         Padding="8,2"
-                        ToolTip="编辑模式：随意拖拽排序（落下即固定）· 点数字设快捷键 · 点面板外关闭并保存"
+                        ToolTip="编辑模式：随意拖拽排序 · 点 📌 固定 · 点数字设快捷号 · 点面板外关闭"
                         Click="OnEditClick"/>
                 <Button x:Name="SettingsButton"
                         Content="⚙ 设置"

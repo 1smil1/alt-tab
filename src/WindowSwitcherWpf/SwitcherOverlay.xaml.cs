@@ -232,11 +232,14 @@ public partial class SwitcherOverlay : Window
     public void ToggleEditMode()
     {
         EditMode = !EditMode;
+        // 编辑布局: 当前窗口卡/上一窗口卡让位成普通卡, 整行右移, 编号从 1
+        // 开始 — 它们才可拖可固定 (用户: "上一个标签固定到 1 现在做不到").
+        _controller.SetEditLayout(EditMode);
         if (EditMode)
         {
             if (_controller.IsInStackView) ExitStackView(); // 子页面没有位置概念
             EditButton.Content = "✓ 完成";
-            ShowStatus("编辑模式：拖拽排序（落下即固定）· 点数字设快捷键 · 点面板外关闭并保存");
+            ShowStatus("编辑模式：拖拽排序 · 点 📌 固定 · 点数字设快捷号 · 点面板外关闭");
         }
         else
         {
@@ -244,6 +247,7 @@ public partial class SwitcherOverlay : Window
             ClearQuickEditPending();
             ShowStatus("");
         }
+        if (!_isOpen) return; // 关闭流程里退编辑模式: 面板马上藏, 不重建
         RebuildFromSlots(preserveScroll: true);
     }
 
@@ -329,7 +333,7 @@ public partial class SwitcherOverlay : Window
     {
         if (!QuickEditPending) return;
         ClearQuickEditPending();
-        ShowStatus(EditMode ? "编辑模式：拖拽排序（落下即固定）· 点数字设快捷键 · 点面板外关闭并保存" : "");
+        ShowStatus(EditMode ? "编辑模式：拖拽排序 · 点 📌 固定 · 点数字设快捷号 · 点面板外关闭" : "");
     }
 
     /// <summary>Esc: 撤销这次角标编辑 (还没输数字就只是退出待定态).</summary>
@@ -2282,7 +2286,7 @@ public partial class SwitcherOverlay : Window
             if (EditMode)
             {
                 // 编辑模式: 整张卡就是排序区 — 左半插前, 右半插后. 拖固定卡
-                // = 取消固定, 落下即在新位置自动固定 (MoveRelativeEdit 内).
+                // = 取消固定, 要固定回新位置再点 📌.
                 movedT = _controller.MoveRelativeEdit(dragHwnd, target.Hwnd, before: rel < 0.5);
             }
             else if (_controller.IsInStackView)

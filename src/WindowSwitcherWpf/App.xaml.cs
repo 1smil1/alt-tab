@@ -967,6 +967,46 @@ public partial class App : Application
             && new OverlayWindow(W("b"), "group:b", 0)
                 { SlotBadge = "", SlotValue = -1, QuickNumber = 7 }.BadgeText == "");
 
+        // 36. 编辑布局: 特殊卡让位, 编号从 1 开始 (可拖可固定).
+        var e36 = SwitcherController.EditLayout(new List<SlotWindow>
+        {
+            new(W("b"), -2, false) { IsCurrentCopy = true },
+            new(W("a"), 0, false),
+            new(W("c"), 1, false),
+            new(W("d"), 2, false),
+        });
+        Check("edit-layout-shifts-numbers-from-one",
+            e36.Count == 4 && e36[0].Entry.Title == "b" && e36[0].Slot == 1
+            && e36[1].Entry.Title == "a" && e36[1].Slot == 2
+            && e36.All(x => !x.IsCurrentCopy && x.Slot != 0),
+            string.Join(',', e36.Select(x => $"{x.Entry.Title}:{x.Slot}")));
+
+        // 37. 编辑布局: 特殊卡的 hwnd 已有真身 (被固定) → 副本不重复显示.
+        var e37 = SwitcherController.EditLayout(new List<SlotWindow>
+        {
+            new(W("b"), -2, false) { IsCurrentCopy = true },
+            new(W("a"), 0, false),
+            new(W("b"), 3, true),
+            new(W("c"), 1, false),
+        });
+        Check("edit-layout-drops-duplicate-copy",
+            e37.Count == 3 && e37.Count(x => x.Entry.Title == "b") == 1
+            && e37[0].Entry.Title == "a" && e37[0].Slot == 1,
+            string.Join(',', e37.Select(x => $"{x.Entry.Title}:{x.Slot}")));
+
+        // 38. 编辑布局: 固定卡的编号不动 (pin 照旧硬占).
+        var e38 = SwitcherController.EditLayout(new List<SlotWindow>
+        {
+            new(W("b"), -2, false) { IsCurrentCopy = true },
+            new(W("a"), 0, false),
+            new(W("c"), 5, true),
+            new(W("d"), 1, false),
+        });
+        Check("edit-layout-keeps-pin-numbers",
+            e38.First(x => x.Entry.Title == "c").Slot == 5
+            && e38.First(x => x.Entry.Title == "c").IsPinned,
+            string.Join(',', e38.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
+
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
     }

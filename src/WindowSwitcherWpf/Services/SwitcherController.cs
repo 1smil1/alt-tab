@@ -138,6 +138,7 @@ public sealed class SwitcherController
         // starts on the main page.
         _inStackView = false;
         _activeStackId = null;
+        _editLayout = false;   // 编辑布局不跨会话 (面板没开时永远是旧布局)
         var foreground = NativeMethods.GetForegroundWindow();
         _lastForeground = foreground;
         Refresh();
@@ -152,6 +153,8 @@ public sealed class SwitcherController
             $"OpenOverlay groups={Groups.Count} flat={_flat.Count} stacks={_stacksByHead.Count}");
         StateChanged?.Invoke();
     }
+
+    private bool _editLayout;   // 编辑模式布局 (SetEditLayout), 每次 RebuildFlat 生效
 
     private void RebuildFlat(IntPtr foreground)
     {
@@ -263,6 +266,7 @@ public sealed class SwitcherController
         // 统一插入 — 复制卡不参与数字寻址/导出/拖拽/cascade (SelectByDigit /
         // CanDrag 各自跳过), Slot 0 卡不可拖拽.
         Slotted = cards;
+        if (_editLayout) Slotted = EditLayout(Slotted);
         _flat = Slotted.Select(s => s.Entry).ToList();
         // Diagnostics: duplicate hwnds in the flat list break the cascade
         // build (two head cards share one stack → orphaned sub cards).
@@ -765,8 +769,7 @@ public sealed class SwitcherController
         var to = list.FindIndex(s => s.Entry.Hwnd == targetHwnd);
         if (from < 0 || to < 0) return false;
 
-        // 固定规则先解除 (含它这个 stack 的成员 pin), 落点再重新固定 —
-// 等价于"把这个 pin 挪到新位置".
+        // 固定规则先解除 (含它这个 stack 的成员 pin) — 拖过的卡要固定得再点 📌.
         var moving = list[from];
         var pin = moving.IsPinned
             ? _order.Pins.FirstOrDefault(p => p.MemberTitle is null
@@ -778,23 +781,44 @@ public sealed class SwitcherController
         Slotted = moved;
         _flat = moved.Select(s => s.Entry).ToList();
 
-        // 自动固定在落点编号 (没有固定就不能跨会话留存顺序). 拖过的卡一律
-        // 重新固定 —— 用户要的正是"拖完就有固定框", 拖固定卡 = 把那个 pin
-        // 挪到新位置, 想真取消固定点 📌.
-        var landed = Slotted.FirstOrDefault(s => s.Entry.Hwnd == movingHwnd
-            && !s.IsCurrentCopy && !s.IsSlot0Copy && s.Slot is >= 1 and <= 10);
-        if (landed is not null
-            && !Slotted.Any(s => s.Entry.Hwnd == movingHwnd && s.IsPinned))
-        {
-            PinHeadCore(landed);
-            WindowSwitcherWpf.Services.Log.Info("Controller",
-                $"edit move → 自动固定 slot={landed.Slot} '{landed.Entry.Title}'");
-        }
-
         _store.SaveDebounced(_order);
         KeepSelection();
         StateChanged?.Invoke();
         return true;
+    }
+
+    /// <summary>编辑模式布局 (纯函数): 让前两张特殊卡让位 — 当前窗口卡
+    /// (Slot=-2) 和上一窗口卡 (Slot=0) 丢掉特殊身份, 变成普通卡, 整行
+    /// 右移 N 位 (N = 剩下的特殊卡数 0/1/2), 编号从 1 开始. 用户: "把上一个
+    /// 标签固定到 1 现在做不到, 因为它不可拖" — 编辑模式就是给他这件事做.
+    ///
+    /// 去重: 某张特殊卡的 hwnd 在编号区已有真身 (被固定了) → 副本不显示,
+    /// 只留真身 (用户: "不要两个 B 应用的卡, 留固定那个"), N 相应减 1.</summary>
+    public static List<SlotWindow> EditLayout(IReadOnlyList<SlotWindow> slotted)
+    {
+        var real = slotted.Where(s => !s.IsCurrentCopy && s.Slot != 0).ToList();
+        var list = slotted.Where(s => (s.IsCurrentCopy || s.Slot == 0)
+                ? !real.Any(o => o.Entry.Hwnd == s.Entry.Hwnd) // 已有真身 → 副本去掉
+                : true).ToList();
+        var result = new List<SlotWindow>(list.Count);
+        foreach (var s in list)
+        {
+            if (s.IsCurrentCopy) result.Add(s with { Slot = -1, IsCurrentCopy = false });
+            else if (s.Slot == 0) result.Add(s with { Slot = -1, IsSlot0Copy = false });
+            else result.Add(s);
+        }
+        return RenumberFlow(result);
+    }
+
+    /// <summary>编辑模式布局开关 (overlay 的「编辑」按钮驱动). 关着时行为
+    /// 与旧版逐字相同; 开着的每次 RebuildFlat 都套一遍 <see cref="EditLayout"/>.</summary>
+    public void SetEditLayout(bool on)
+    {
+        if (_editLayout == on) return;
+        _editLayout = on;
+        RebuildFlat(_lastForeground);
+        KeepSelection();
+        StateChanged?.Invoke();
     }
 
     /// <summary>Pure renumber pass over an ordered card list (单调编号):
