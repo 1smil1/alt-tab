@@ -40,6 +40,12 @@ public partial class SettingsWindow : Window
             false => 2,
         };
         AutoStartBox.IsChecked = cfg.AutoStart ?? true;
+        CommitMinBox.IsChecked = cfg.CommitMinimizeOnSame ?? false;
+        CommitMinPinnedBox.IsChecked = cfg.CommitMinimizePinnedOnSame
+                                        ?? cfg.CommitMinimizeOnSame ?? false;
+        QuickMinBox.IsChecked = cfg.QuickMinimizeOnSame ?? true;
+        QuickMinPinnedBox.IsChecked = cfg.QuickMinimizePinnedOnSame
+                                       ?? cfg.QuickMinimizeOnSame ?? true;
         ValidateHotkey();
     }
 
@@ -99,6 +105,10 @@ public partial class SettingsWindow : Window
             _ => null,
         };
         cfg.AutoStart = AutoStartBox.IsChecked == true;
+        cfg.CommitMinimizeOnSame = CommitMinBox.IsChecked == true;
+        cfg.CommitMinimizePinnedOnSame = CommitMinPinnedBox.IsChecked == true;
+        cfg.QuickMinimizeOnSame = QuickMinBox.IsChecked == true;
+        cfg.QuickMinimizePinnedOnSame = QuickMinPinnedBox.IsChecked == true;
         // 注册表即时落盘 (cfg.Save 失败也不会回滚勾选状态 — 用户至少知道
         // 应用层记住了, 手动重勾可恢复).
         AutoStartService.Apply(cfg.AutoStart == true, AutoStartService.GetCurrentExePath());

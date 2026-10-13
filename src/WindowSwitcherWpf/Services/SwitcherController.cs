@@ -880,8 +880,33 @@ public sealed class SwitcherController
         // on the main page.
         StackViewReset();
         WindowSwitcherWpf.Services.Log.Info("Controller", $"commit 0x{entry.Hwnd.ToInt64():X} '{entry.Title}'");
+        // 选中的就是当前前台: 按设置缩小化 (默认否 — 照旧走激活).
+        if (ShouldMinimize(entry.Hwnd, _config.CommitMinimizeOnSame,
+                _config.CommitMinimizePinnedOnSame, "commit"))
+        {
+            NativeMethods.ShowWindowAsync(entry.Hwnd, NativeMethods.SW_MINIMIZE);
+            return;
+        }
         _activate(entry.Hwnd);
     }
+
+    /// <summary>选中的是当前前台时要不要缩小化. flow = 流动标签的开关,
+    /// pinned = 固定标签的独立开关 (null = 跟随 flow). 调用点自己执行缩小化.</summary>
+    private bool ShouldMinimize(IntPtr hwnd, bool? flow, bool? pinned, string path)
+    {
+        var on = ResolveMinimize(flow, pinned, IsStackPinned(hwnd));
+        if (!on) return false;
+        if (hwnd != NativeMethods.GetForegroundWindow() || NativeMethods.IsIconic(hwnd))
+            return false;
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"{path} minimize 0x{hwnd.ToInt64():X} (pinned={IsStackPinned(hwnd)})");
+        return true;
+    }
+
+    /// <summary>Pure part of <see cref="ShouldMinimize"/>: pinned 开关 null =
+    /// 跟随 flow, flow null = false. --test-config 覆盖.</summary>
+    public static bool ResolveMinimize(bool? flow, bool? pinned, bool isPinned) =>
+        (isPinned ? pinned ?? flow : flow) ?? false;
 
     /// <summary>一次直达前调: Slotted 常驻态是陈旧的 (只在 overlay 打开时
     /// 重建) — 先枚举一次活窗口, 编号→窗口映射才可信.</summary>
@@ -913,12 +938,11 @@ public sealed class SwitcherController
     public void QuickActivate(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return;
-        if (hwnd == NativeMethods.GetForegroundWindow() && !NativeMethods.IsIconic(hwnd))
+        if (ShouldMinimize(hwnd, _config.QuickMinimizeOnSame ?? true,
+                _config.QuickMinimizePinnedOnSame, "quick jump toggle"))
         {
             // ShowWindowAsync: 控制台类宿主窗口同步 ShowWindow 可能阻塞钩子链.
             NativeMethods.ShowWindowAsync(hwnd, NativeMethods.SW_MINIMIZE);
-            WindowSwitcherWpf.Services.Log.Info("Controller",
-                $"quick jump toggle → minimize 0x{hwnd.ToInt64():X}");
             return;
         }
         var entry = _flat.Find(w => w.Hwnd == hwnd);

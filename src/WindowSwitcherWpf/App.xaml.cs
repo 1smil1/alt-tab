@@ -924,6 +924,16 @@ public partial class App : Application
             HotkeyParser.ModifierKeys("Ctrl")[0] == 0x11
             && HotkeyParser.ModifierKeys(null)[0] == 0x12);
 
+        // 缩小化开关解析: pinned null = 跟随 flow, flow null = 否.
+        var R = SwitcherController.ResolveMinimize;
+        Check("minimize-default-off", !R(null, null, false) && !R(null, null, true));
+        Check("minimize-flow-on", R(true, null, false));
+        Check("minimize-pinned-follows-flow", R(true, null, true));
+        Check("minimize-pinned-override-off",
+            R(true, false, false) && !R(true, false, true));
+        Check("minimize-pinned-only",
+            !R(false, true, false) && R(false, true, true));
+
         WindowSwitcherWpf.Services.Log.Info("ConfigTests", "done");
         Environment.Exit(0);
     }

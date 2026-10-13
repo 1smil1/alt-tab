@@ -81,6 +81,38 @@
                 </StackPanel>
             </Border>
 
+            <!-- ============ 选中即缩小化 ============ -->
+            <TextBlock Text="选中同一个窗口时缩小化" FontSize="16" FontWeight="Bold"
+                       Foreground="#FFE0E0E0"/>
+            <Border Background="#FF2A2A2A" CornerRadius="8"
+                    Padding="14,10" Margin="0,8,0,16">
+                <StackPanel>
+                    <TextBlock Text="面板内提交（方向键 / Alt+Tab 循环后松开 Alt）"
+                               Foreground="#FFE0E0E0"/>
+                    <CheckBox x:Name="CommitMinBox" Margin="0,6,0,0"
+                              Foreground="#FFE0E0E0"
+                              Content="选中的就是当前前台 → 缩小化"/>
+                    <CheckBox x:Name="CommitMinPinnedBox" Margin="0,6,0,0"
+                              Foreground="#FFE0E0E0"
+                              Content="固定标签同上（不勾 = 固定标签只激活）"/>
+                    <TextBlock Text='Alt+Tab / 方向键选中已在呈现的窗口，松开 Alt 时缩小化。'
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
+
+                    <TextBlock Text="一次直达（Alt+数字，面板关闭时）"
+                               Foreground="#FFE0E0E0" Margin="0,14,0,0"/>
+                    <CheckBox x:Name="QuickMinBox" Margin="0,6,0,0"
+                              Foreground="#FFE0E0E0"
+                              Content="选中的就是当前前台 → 缩小化"/>
+                    <CheckBox x:Name="QuickMinPinnedBox" Margin="0,6,0,0"
+                              Foreground="#FFE0E0E0"
+                              Content="固定标签同上（不勾 = 固定标签只激活）"/>
+                    <TextBlock Text='直达再按一次当前前台窗口 = 收起。'
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+
             <!-- ============ 底部按钮 ============ -->
             <Grid>
                 <Grid.ColumnDefinitions>

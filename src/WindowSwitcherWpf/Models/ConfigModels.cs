@@ -35,6 +35,21 @@ public sealed class ConfigFile
     /// <summary>开机自启动 (写 HKCU\...\Run). null = 默认 true (首次启动
     /// 写一次注册表); true/false = 用户在设置里手动改过.</summary>
     public bool? AutoStart { get; set; }
+
+    /// <summary>面板内选中并提交 (方向键/Alt+Tab 循环后松开 Alt) 时, 选中的
+    /// 窗口就是当前前台 → 缩小化它. null = 默认 false (照旧只激活).</summary>
+    public bool? CommitMinimizeOnSame { get; set; }
+
+    /// <summary>同上, 但只对固定标签生效. null = 跟随 CommitMinimizeOnSame
+    /// (未固定与固定分开开关 — 用户可只让流动标签缩小化).</summary>
+    public bool? CommitMinimizePinnedOnSame { get; set; }
+
+    /// <summary>一次直达 (Alt+数字, overlay 关着) 目标就是前台 → 缩小化.
+    /// null = 默认 true (现行为: 再按一次收起).</summary>
+    public bool? QuickMinimizeOnSame { get; set; }
+
+    /// <summary>同上, 但只对固定标签生效. null = 跟随 QuickMinimizeOnSame.</summary>
+    public bool? QuickMinimizePinnedOnSame { get; set; }
 }
 
 /// <summary>手动堆叠 (自定义集中): an ordered set of windows collapsed into
