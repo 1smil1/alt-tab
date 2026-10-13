@@ -294,6 +294,11 @@ public partial class SwitcherOverlay : Window
                 var ow = new OverlayWindow(sw.Entry, sw.Entry.GroupKey, 0)
                 {
                     SlotBadge = sw.Slot >= 0 ? sw.Slot.ToString() : "",
+                    SlotValue = sw.Slot,
+                    // 位置号 != 快捷号时才显示成 "位置(快捷)" (未指派 = 回落
+                    // 位置号 = null, 与位置号相同时也是 null).
+                    QuickNumber = _controller.QuickNumberFor(sw) is var qn && qn != sw.Slot
+                        ? qn : null,
                     IsPinned = sw.IsPinned,
                     IsCurrentCopy = sw.IsCurrentCopy,
                     IsSlot0Copy = sw.IsSlot0Copy,
@@ -2435,6 +2440,20 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     }
     public System.Windows.Visibility BadgeVisibility =>
         string.IsNullOrEmpty(SlotBadge) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+
+    /// <summary>位置编号 (Slot). -2 = 当前窗口副本, -1 = 无编号 (溢出).</summary>
+    public int SlotValue { get; init; } = -2;
+
+    /// <summary>单独指派的一次直达号码; null = 没指派或就等于位置号
+    /// (= 旧行为, 不显示额外信息).</summary>
+    public int? QuickNumber { get; init; }
+
+    /// <summary>角标文本: 位置号 == 快捷号就只显示一个数字; 不同时显示
+    /// "2(5)" = 在位置 2, Alt+5 直达.</summary>
+    public string BadgeText =>
+        QuickNumber is { } q && !string.IsNullOrEmpty(SlotBadge) && q != SlotValue
+            ? $"{SlotBadge}({q})"
+            : SlotBadge;
 
     // Pinned windows keep their slot number; they are skipped by smart
     // sort and cannot be dragged (enforced in the S4 drag model).

@@ -165,7 +165,7 @@
                                                 VerticalAlignment="Center"
                                                 Visibility="{Binding BadgeVisibility}"
                                                 ToolTip="Alt+数字 直达此标签">
-                                            <TextBlock Text="{Binding SlotBadge}"
+                                            <TextBlock Text="{Binding BadgeText}"
                                                        FontSize="10"
                                                        FontWeight="Bold"
                                                        Foreground="#FF5A5A5A"

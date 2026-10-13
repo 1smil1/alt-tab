@@ -931,6 +931,20 @@ public partial class App : Application
             && moved33[1].Slot == 0 && moved33[2].Slot == 1,
             string.Join(',', moved33.Select(x => $"{x.Entry.Title}:{x.Slot}")));
 
+        // 34. 角标文本: 快捷号 == 位置号 → 单数字; 不等 → "2(5)".
+        Check("badge-single-number-when-equal",
+            new OverlayWindow(W("a"), "group:a", 0)
+                { SlotBadge = "5", SlotValue = 5, QuickNumber = null }.BadgeText == "5"
+            && new OverlayWindow(W("a"), "group:a", 0)
+                { SlotBadge = "5", SlotValue = 5, QuickNumber = 5 }.BadgeText == "5");
+
+        // 35. 溢出卡没有位置号 (badge 为空), 但设了快捷号就显示它.
+        Check("badge-pair-when-different",
+            new OverlayWindow(W("a"), "group:a", 0)
+                { SlotBadge = "2", SlotValue = 2, QuickNumber = 5 }.BadgeText == "2(5)"
+            && new OverlayWindow(W("b"), "group:b", 0)
+                { SlotBadge = "", SlotValue = -1, QuickNumber = 7 }.BadgeText == "");
+
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
     }
