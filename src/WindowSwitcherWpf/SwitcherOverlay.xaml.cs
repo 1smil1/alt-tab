@@ -152,6 +152,10 @@ public partial class SwitcherOverlay : Window
             _isOpen = true;
             _thumbTimer.Start();
             CenterOnCursorMonitor();
+            // 初次 Rebuild 跑在 Show() 之前, 那时容器还没 realize, 光晕那次
+            // FlashSelectionGlow 直接跳过. Show 之后再刷一次 — 容器已就位,
+            // 开面板的第一下也有光晕.
+            RebuildSelection();
             // The Rebuild() above ran while _isOpen was still false, so its
             // thumbnail/cascade chain was skipped — schedule it now that the
             // window is shown and open (Loaded < ApplicationIdle, so these
@@ -537,6 +541,10 @@ public partial class SwitcherOverlay : Window
         // 模板根就是 GlowRing (DataTemplate 最外层 Border). 不用 FindName:
         // 容器还在生成时 (Rebuild 早于 Show) FindName 会抛
         // InvalidOperationException "此操作仅在应用此模板的元素上有效".
+        // GetChild 同理要先确认有子元素 — 未 realize 的容器 VisualChildCount=0,
+        // GetChild(0) 会抛 ArgumentOutOfRangeException. 这时跳过, 由 Show 之后
+        // 那次 RebuildSelection 补上 (容器已 realize).
+        if (VisualTreeHelper.GetChildrenCount(cp) == 0) return;
         if (VisualTreeHelper.GetChild(cp, 0) is not Border glow) return;
         glow.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0,
             TimeSpan.FromMilliseconds(550))
