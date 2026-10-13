@@ -24,19 +24,18 @@ public static class ActivationService
             SendInput(1, new[] { noop }, Marshal.SizeOf<INPUT>());
             if (SetForegroundWindow(hwnd))
             {
-                WindowSwitcherWpf.Services.Log.Info("Activate", "SetForegroundWindow ok");
-                // 切到窗口后, 在那个窗口外框闪一圈蓝光 (config SelectionGlow,
-                // 默认开). 走 Dispatcher — 排在激活之后, 拿到的 rect 已是摆好
-                // 之后的最终位置.
+                // 先闪再记日志: 边框要抢在窗口切换之后立刻出现, 日志写盘
+                // 是同步的, 排在前面就白白多几十毫秒.
                 WindowSwitcherWpf.Interop.WindowFlash.Flash(hwnd);
+                WindowSwitcherWpf.Services.Log.Info("Activate", "SetForegroundWindow ok");
                 return true;
             }
             WindowSwitcherWpf.Services.Log.Warn("Activate",
                 "first SetForegroundWindow returned false, retrying");
             System.Threading.Thread.Sleep(50);
             var ok = SetForegroundWindow(hwnd);
-            WindowSwitcherWpf.Services.Log.Info("Activate", $"retry -> {ok}");
             if (ok) WindowSwitcherWpf.Interop.WindowFlash.Flash(hwnd);
+            WindowSwitcherWpf.Services.Log.Info("Activate", $"retry -> {ok}");
             return ok;
         }
         catch (Exception ex)
