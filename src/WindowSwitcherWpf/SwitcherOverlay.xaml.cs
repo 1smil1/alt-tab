@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using WindowSwitcherWpf.Interop;
@@ -239,7 +240,7 @@ public partial class SwitcherOverlay : Window
         {
             if (_controller.IsInStackView) ExitStackView(); // 子页面没有位置概念
             EditButton.Content = "✓ 完成";
-            ShowStatus("编辑模式：拖拽排序 · 点 📌 固定 · 点数字设快捷号 · 点面板外关闭");
+            ShowStatus("编辑模式：拖拽排序 · 点 📌 固定 · 点左上角数字设快捷号 · 点面板外关闭");
         }
         else
         {
@@ -295,10 +296,29 @@ public partial class SwitcherOverlay : Window
             s => s.Entry.Hwnd == ow.Hwnd && !s.IsCurrentCopy);
         _quickEditOriginal = sw is not null && _controller.QuickNumberFor(sw) is var q
             && q != sw.Slot ? q : null;
-        ShowStatus("输入数字设快捷号 (0=10) · Enter 确认 · Esc 取消", 8000);
+        ShowStatus("输入数字设快捷号 (0=10) · Esc 取消", 8000);
         WindowSwitcherWpf.Services.Log.Info("Overlay",
             $"quick edit start '{ow.DisplayTitle}' hwnd=0x{ow.Hwnd.ToInt64():X}");
         e.Handled = true;
+        // 重建一次让这颗角标进入闪烁态 (用户: "点一下就该看见在闪")
+        RebuildFromSlots(preserveScroll: true);
+        StartQuickBlink(ow.Hwnd);
+    }
+
+    /// <summary>改号待定: 那颗角标里的 "(N)" 一直闪. 停靠重建自然结束
+    /// (号码一落盘就 RebuildFromSlots, 新容器没有动画).</summary>
+    private void StartQuickBlink(IntPtr hwnd)
+    {
+        var ow = _windows.FirstOrDefault(w => w.Hwnd == hwnd);
+        if (ow is null
+            || WindowsList.ItemContainerGenerator.ContainerFromItem(ow) is not ContentPresenter cp
+            || WindowsList.ItemTemplate?.FindName("QuickPart", cp) is not TextBlock tb) return;
+        tb.BeginAnimation(System.Windows.UIElement.OpacityProperty,
+            new DoubleAnimation(1, 0.15, TimeSpan.FromMilliseconds(400))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+            });
     }
 
     private void ClearQuickEditPending()
@@ -328,12 +348,13 @@ public partial class SwitcherOverlay : Window
         RebuildFromSlots(preserveScroll: true);
     }
 
-    /// <summary>Enter: 没有输入数字时按原值收工 (等价确认).</summary>
+    /// <summary>Enter 语义: 号码即时生效, Enter 只是关掉闪烁 (不改任何东西).</summary>
     public void ConfirmQuickEdit()
     {
         if (!QuickEditPending) return;
         ClearQuickEditPending();
-        ShowStatus(EditMode ? "编辑模式：拖拽排序 · 点 📌 固定 · 点数字设快捷号 · 点面板外关闭" : "");
+        ShowStatus("");
+        RebuildFromSlots(preserveScroll: true);
     }
 
     /// <summary>Esc: 撤销这次角标编辑 (还没输数字就只是退出待定态).</summary>
@@ -437,6 +458,8 @@ public partial class SwitcherOverlay : Window
                     // 位置号 = null, 与位置号相同时也是 null).
                     QuickNumber = _controller.QuickNumberFor(sw) is var qn && qn != sw.Slot
                         ? qn : null,
+                    // 待定改号的那张卡闪烁 (state 存 hwnd, 因为每次重建)
+                    IsQuickEditing = _quickEditHwnd == sw.Entry.Hwnd,
                     IsPinned = sw.IsPinned,
                     IsCurrentCopy = sw.IsCurrentCopy,
                     IsSlot0Copy = sw.IsSlot0Copy,
@@ -2625,6 +2648,21 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
         QuickNumber is { } q && !string.IsNullOrEmpty(SlotBadge) && q != SlotValue
             ? $"{SlotBadge}({q})"
             : SlotBadge;
+
+    /// <summary>角标里独立的 "(快捷号)" 部分 (位置号之后). 没指派/等于
+    /// 位置号 → 空, 整个第二段隐藏.</summary>
+    public string QuickSuffix =>
+        QuickNumber is { } q && !string.IsNullOrEmpty(SlotBadge) && q != SlotValue
+            ? $"({q})"
+            // 还没指派过快捷号: 进改号态要有个能闪的东西, 否则点了跟没点一样
+            : IsQuickEditing ? "(?)" : "";
+    public System.Windows.Visibility QuickBadgeVisibility =>
+        QuickSuffix.Length == 0
+            ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+
+    /// <summary>正在等数字给这张卡设快捷号 — 模板里括号部分闪烁 + chip
+    /// 描琥珀边 (用户: "点一下应该出现闪烁状态, 输完数字停").</summary>
+    public bool IsQuickEditing { get; init; }
 
     // Pinned windows keep their slot number; they are skipped by smart
     // sort and cannot be dragged (enforced in the S4 drag model).

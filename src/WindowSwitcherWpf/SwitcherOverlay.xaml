@@ -173,19 +173,41 @@
                                              角，标题logo前面): 0 = most recent,
                                              1..10 managed slots, hidden if
                                              unmanaged. -->
-                                        <Border Background="{Binding GroupBadgeBrush}"
-                                                CornerRadius="4"
+                                        <!-- 位置号 chip. 括号里的快捷号是第二个 TextBlock: 点击角标进入
+                                                             改号时它闪烁 (IsQuickEditing trigger), 输完数字停. -->
+                                        <Border CornerRadius="4"
                                                 Margin="0,0,5,0"
                                                 VerticalAlignment="Center"
                                                 Visibility="{Binding BadgeVisibility}"
                                                 MouseLeftButtonDown="OnToolDown"
                                                 MouseLeftButtonUp="OnBadgeClick"
                                                 ToolTip="位置号(快捷号) · 编辑模式下点这里改快捷号">
-                                            <TextBlock Text="{Binding BadgeText}"
-                                                       FontSize="10"
-                                                       FontWeight="Bold"
-                                                       Foreground="#FF5A5A5A"
-                                                       Margin="4,1"/>
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="{Binding GroupBadgeBrush}"/>
+                                                    <Style.Triggers>
+                                                        <!-- 正在改这张卡的快捷号: 整个 chip 变琥珀 + 括号部分闪烁 -->
+                                                        <DataTrigger Binding="{Binding IsQuickEditing}" Value="True">
+                                                            <Setter Property="BorderBrush" Value="#FFD97706"/>
+                                                            <Setter Property="BorderThickness" Value="1"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="{Binding SlotBadge}"
+                                                           FontSize="10"
+                                                           FontWeight="Bold"
+                                                           Foreground="#FF5A5A5A"
+                                                           Margin="4,1"/>
+                                                <TextBlock x:Name="QuickPart"
+                                                           Text="{Binding QuickSuffix}"
+                                                           FontSize="10"
+                                                           FontWeight="Bold"
+                                                           Foreground="#FFB45309"
+                                                           Margin="1,1,4,1"
+                                                           Visibility="{Binding QuickBadgeVisibility}"/>
+                                            </StackPanel>
                                         </Border>
                                         <!-- Stack member count: ×N badge right
                                              after the slot digit (堆叠共用一
