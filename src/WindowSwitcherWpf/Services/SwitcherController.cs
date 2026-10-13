@@ -46,6 +46,7 @@ public sealed class SwitcherController
     /// 依据; 按 pin 实例引用作键 — PinDefinition 未重写 Equals. ReloadOrder
     /// /模板整体替换 Pins 后旧键自然失效, 无需清理).</summary>
     private readonly Dictionary<PinDefinition, IntPtr> _pinHwnd = new();
+    private readonly Dictionary<QuickNumberDef, IntPtr> _quickHwnd = new();
     public int ActiveFlatIndex { get; private set; }
     public int ActiveGroupIndex { get; private set; }
     public int ActiveWindowIndex { get; private set; }
@@ -224,7 +225,7 @@ public sealed class SwitcherController
         // Pin 标题跟随 (修复: 编辑器/浏览器标题随文件/标签页变, pin 按
         // GroupKey+Title 匹配随即失配 — 用户: 固定好的 3 号"自己取消固定
         // 了"). 变更落盘, 下次启动 pin 已在新标题上.
-        if (FollowPinTitles(_order.Pins, mru, _pinHwnd))
+        if (FollowPinTitles(_order.Pins, mru, _pinHwnd, _order.QuickNumbers, _quickHwnd))
             _store.SaveDebounced(_order);
 
         var cards = AssignSlots(mru, _order.Pins, foreground);
@@ -288,7 +289,9 @@ public sealed class SwitcherController
     /// 存活的语义不变). 静态纯函数 (lastHwnd 由调用方持有) — --test-slots
     /// 覆盖. Returns true when pins were mutated (caller persists).</summary>
     public static bool FollowPinTitles(List<PinDefinition> pins, List<WindowEntry> mru,
-        Dictionary<PinDefinition, IntPtr> lastHwnd)
+        Dictionary<PinDefinition, IntPtr> lastHwnd,
+        List<QuickNumberDef>? quicks = null,
+        Dictionary<QuickNumberDef, IntPtr>? quickHwnd = null)
     {
         var changed = false;
         foreach (var pin in pins.ToList())
@@ -320,6 +323,34 @@ public sealed class SwitcherController
             pin.Title = follow.Title;
             pins.Add(pin);
             lastHwnd[pin] = follow.Hwnd;
+        }
+        // 一次直达号码走同一套标题跟随/去重 (身份字段完全相同), 只是
+        // 不参与位置分配, 所以单独跑一遍而不是塞进上面的循环.
+        if (quicks is not null && quickHwnd is not null)
+        {
+            foreach (var q in quicks.ToList())
+            {
+                var match = mru.Find(w => w.GroupKey == q.GroupKey && w.Title == q.Title);
+                if (match is not null)
+                {
+                    quickHwnd[q] = match.Hwnd;
+                    continue;
+                }
+                if (!quickHwnd.TryGetValue(q, out var last)) continue;
+                var follow = mru.Find(w => w.Hwnd == last && w.GroupKey == q.GroupKey);
+                if (follow is null) continue; // 窗口关了 / 换了进程组 — 维持休眠
+                var twin = quicks.Any(x => x != q
+                    && x.GroupKey == follow.GroupKey && x.Title == follow.Title);
+                quicks.Remove(q);
+                quickHwnd.Remove(q);
+                changed = true;
+                if (twin) continue; // 僵尸副本, 直接丢
+                WindowSwitcherWpf.Services.Log.Info("Controller",
+                    $"quick follow: n={q.Number} '{q.Title}' → '{follow.Title}'");
+                q.Title = follow.Title;
+                quicks.Add(q);
+                quickHwnd[q] = follow.Hwnd;
+            }
         }
         return changed;
     }
@@ -459,16 +490,7 @@ public sealed class SwitcherController
             && p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title);
         if (pin is not null)
         {
-            // Unpinning a stack head also releases its member pins — the
-            // members' guarantee (主标签固定) dies with the stack pin.
-            var headStackId = FindDef(_config.Stacks, sw.Entry)?.Id;
-            _order.Pins.RemoveAll(p => p.MemberTitle is not null
-                && (headStackId is not null
-                    ? p.StackId == headStackId
-                    : p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title));
-            _order.Pins.Remove(pin);
-            WindowSwitcherWpf.Services.Log.Info("Controller",
-                $"unpin slot={pin.Slot} '{sw.Entry.Title}'");
+            UnpinCore(sw, pin);
         }
         else
         {
@@ -480,6 +502,21 @@ public sealed class SwitcherController
         RebuildFlat(_lastForeground);
         KeepSelection();
         StateChanged?.Invoke();
+    }
+
+    /// <summary>取消固定: 删掉该卡自己的 pin, 并连带释放它这个 stack 的
+    /// 成员 pin (主标签不固定了, 成员也没理由固定). 编辑模式"拖动已固定的
+    /// 卡 = 取消固定" 走的是同一段逻辑. Caller persists + reflows.</summary>
+    private void UnpinCore(SlotWindow sw, PinDefinition pin)
+    {
+        var headStackId = FindDef(_config.Stacks, sw.Entry)?.Id;
+        _order.Pins.RemoveAll(p => p.MemberTitle is not null
+            && (headStackId is not null
+                ? p.StackId == headStackId
+                : p.GroupKey == sw.Entry.GroupKey && p.Title == sw.Entry.Title));
+        _order.Pins.Remove(pin);
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"unpin slot={pin.Slot} '{sw.Entry.Title}'");
     }
 
     /// <summary>Pin-side of TogglePin: freeze this card's current number
@@ -691,6 +728,67 @@ public sealed class SwitcherController
         }
         Slotted = renumbered;
         _flat = renumbered.Select(s => s.Entry).ToList();
+        KeepSelection();
+        StateChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>编辑模式的纯移动: 被拖的卡解除固定 (拖固定卡 = 取消固定,
+    /// 用户在落点点 📌 再重新钉住), slot 0 卡并入流编号 (不再是特殊最左),
+    /// 不做 PinsAnchored 校验 — 编辑模式下位置就是随便放的.</summary>
+    public static List<SlotWindow> EditMove(IReadOnlyList<SlotWindow> ordered, int from, int to,
+        bool before)
+    {
+        // 副本卡 (-2 当前窗口 / 0 号副本) 永远不拖: 它们只是同 hwnd 真身
+        // 的别名, 拖它会按 hwnd 解析到另一张卡. 真身单独可拖.
+        if (ordered[from].IsCurrentCopy || ordered[from].IsSlot0Copy)
+            return ordered.ToList();
+        var list = ordered.ToList();
+        var moving = list[from] with { IsPinned = false };
+        if (moving.Slot == 0 && !moving.IsCurrentCopy)
+            moving = moving with { Slot = -1 };
+        list.RemoveAt(from);
+        if (to > from) to--; // 摘掉前面那张之后落点前移
+        list.Insert(before ? to : to + 1, moving);
+        return RenumberFlow(list);
+    }
+
+    /// <summary>编辑模式拖拽: 任意卡都能动 (固定卡拖动 = 取消固定), 落点
+    /// 自由; 落下后在它的位置编号上自动固定, 这样重排才跨会话留存
+    /// (否则 AssignSlots 每次按 MRU+pins 重算, 松手即丢). 与 MoveRelative
+    /// 的区别仅在"没有拒绝路径".</summary>
+    public bool MoveRelativeEdit(IntPtr movingHwnd, IntPtr targetHwnd, bool before)
+    {
+        if (movingHwnd == targetHwnd) return false;
+        var list = Slotted.ToList();
+        var from = list.FindIndex(s => s.Entry.Hwnd == movingHwnd);
+        var to = list.FindIndex(s => s.Entry.Hwnd == targetHwnd);
+        if (from < 0 || to < 0) return false;
+
+        // 拖固定卡 = 取消固定 (含它这个 stack 的成员 pin)
+        var moving = list[from];
+        var pin = moving.IsPinned
+            ? _order.Pins.FirstOrDefault(p => p.MemberTitle is null
+                && p.GroupKey == moving.Entry.GroupKey && p.Title == moving.Entry.Title)
+            : null;
+        if (pin is not null) UnpinCore(moving, pin);
+
+        var moved = EditMove(list, from, to, before);
+        Slotted = moved;
+        _flat = moved.Select(s => s.Entry).ToList();
+
+        // 自动固定在落点编号 (没有固定就不能跨会话留存顺序)
+        var landed = Slotted.FirstOrDefault(s => s.Entry.Hwnd == movingHwnd
+            && !s.IsCurrentCopy && !s.IsSlot0Copy && s.Slot is >= 1 and <= 10);
+        if (landed is not null && pin is null
+            && !Slotted.Any(s => s.Entry.Hwnd == movingHwnd && s.IsPinned))
+        {
+            PinHeadCore(landed);
+            WindowSwitcherWpf.Services.Log.Info("Controller",
+                $"edit move → 自动固定 slot={landed.Slot} '{landed.Entry.Title}'");
+        }
+
+        _store.SaveDebounced(_order);
         KeepSelection();
         StateChanged?.Invoke();
         return true;
@@ -918,17 +1016,113 @@ public sealed class SwitcherController
         RebuildFlat(fg);
     }
 
-    /// <summary>一次直达: quick+数字 的目标 hwnd — 该编号卡的窗口; 卡是
-    /// 堆叠头时返回 head hwnd (按住才进子页面, 快速松开=跳 head).
-    /// 复制卡不参与寻址. 0x0 = 无此编号.</summary>
-    public IntPtr SlotCardHwnd(int digit)
+    /// <summary>一次直达: quick+数字 的目标 hwnd — 先看该卡有没有单独指派
+    /// 一次直达号码, 没指派就回落到位置编号 (旧行为); 卡是堆叠头时返回
+    /// head hwnd (按住才进子页面, 快速松开=跳 head). 复制卡不参与寻址.
+    /// 0x0 = 无此号码.</summary>
+    public IntPtr SlotCardHwnd(int digit) =>
+        QuickCardHwnd(Slotted, _order.QuickNumbers, digit);
+
+    /// <summary>键 → 号码: 10 号用键 0 输入 (键只有 0-9).</summary>
+    public static int NumberForKey(int key) => key == 0 ? 10 : key;
+
+    /// <summary>号码 → 键 (10 → 0).</summary>
+    public static int KeyForNumber(int number) => number == 10 ? 0 : number;
+
+    /// <summary>该卡生效的一次直达号码: 显式指派优先, 否则回落到位置
+    /// 编号 (1..10). -2 复制卡 / -1 溢出卡没有位置号 ⇒ -1, 只能被显式
+    /// 指派.</summary>
+    public static int QuickNumberOf(SlotWindow sw, List<QuickNumberDef> quicks)
     {
-        for (var i = 0; i < Slotted.Count; i++)
+        foreach (var q in quicks)
+            if (q.GroupKey == sw.Entry.GroupKey && q.Title == sw.Entry.Title)
+                return q.Number;
+        return sw.Slot >= 1 && sw.Slot <= 10 ? sw.Slot : -1;
+    }
+
+    /// <summary>overlay 关闭时 Alt+N 的解析. 第一遍找显式指派 (含 10 号
+    /// ← 键 0), 首个命中即返回; 第二遍回落到位置号 — 逐字复刻旧
+    /// SlotCardHwnd 的行为 (键 0 → 位置 0 的上一窗口卡). 复制卡两遍都
+    /// 跳过; 溢出卡 (Slot=-1) 只能靠显式号码命中.</summary>
+    public static IntPtr QuickCardHwnd(IReadOnlyList<SlotWindow> slots,
+        List<QuickNumberDef> quicks, int digit)
+    {
+        foreach (var sw in slots)
         {
-            if (Slotted[i].IsCurrentCopy) continue;
-            if (Slotted[i].Slot == digit) return Slotted[i].Entry.Hwnd;
+            if (sw.IsCurrentCopy) continue;
+            foreach (var q in quicks)
+                if (q.GroupKey == sw.Entry.GroupKey && q.Title == sw.Entry.Title
+                    && KeyForNumber(q.Number) == digit)
+                    return sw.Entry.Hwnd;
+        }
+        foreach (var sw in slots)
+        {
+            if (sw.IsCurrentCopy) continue;
+            if (sw.Slot == digit) return sw.Entry.Hwnd;
         }
         return IntPtr.Zero;
+    }
+
+    /// <summary>给某卡指派一次直达号码 (编辑模式). 号码与该卡当前位置号
+    /// 相同 = 不落盘 (回落已经覆盖). 冲突互斥: 抢走别人的号码时把对方的
+    /// 指派删掉, 并把对方的 def 退回给调用方去提示. 与位置号相同 ⇒ 顺手
+    /// 清掉自己已有的指派. 返回被清掉的 def (null = 无冲突).</summary>
+    public static QuickNumberDef? AssignQuick(List<QuickNumberDef> quicks,
+        string groupKey, string title, int number, int slot)
+    {
+        quicks.RemoveAll(q => q.GroupKey == groupKey && q.Title == title);
+        if (number == slot) return null; // 与位置号一致 — 不需要指派
+        QuickNumberDef? stolen = null;
+        for (var i = 0; i < quicks.Count; i++)
+            if (quicks[i].Number == number)
+            {
+                stolen = quicks[i];
+                quicks.RemoveAt(i);
+                break;
+            }
+        quicks.Add(new QuickNumberDef(groupKey, title, number));
+        return stolen;
+    }
+
+    /// <summary>overlay 渲染用: 该卡当前生效的一次直达号码.</summary>
+    public int QuickNumberFor(SlotWindow sw) => QuickNumberOf(sw, _order.QuickNumbers);
+
+    /// <summary>给卡指派一次直达号码 (1..10). 返回被顶掉那张卡的标题
+    /// (null = 无冲突), 供 overlay 提示.</summary>
+    public string? SetQuickNumber(IntPtr hwnd, int number)
+    {
+        if (_inStackView) return null; // 子页面数字是相对成员序号
+        if (number is < 1 or > 10) return null;
+        var sw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd
+                       && !s.IsCurrentCopy && !s.IsSlot0Copy)
+              ?? Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd && !s.IsCurrentCopy);
+        if (sw is null) return null;
+        var stolen = AssignQuick(_order.QuickNumbers, sw.Entry.GroupKey, sw.Entry.Title,
+            number, sw.Slot);
+        _store.SaveDebounced(_order);
+        RebuildFlat(_lastForeground);
+        KeepSelection();
+        StateChanged?.Invoke();
+        WindowSwitcherWpf.Services.Log.Info("Controller",
+            $"quick set: '{sw.Entry.Title}' n={number} slot={sw.Slot}"
+            + (stolen is null ? "" : $" (顶掉 '{stolen.Title}')"));
+        return stolen?.Title;
+    }
+
+    /// <summary>清掉某卡的一次直达指派 (回到"位置号即快捷号"). 返回是否
+    /// 真的清掉了东西 (Esc 回滚要区分"本来就没指派").</summary>
+    public bool ClearQuickNumber(IntPtr hwnd)
+    {
+        var sw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd && !s.IsCurrentCopy);
+        if (sw is null) return false;
+        var n = _order.QuickNumbers.RemoveAll(q =>
+            q.GroupKey == sw.Entry.GroupKey && q.Title == sw.Entry.Title);
+        if (n == 0) return false;
+        _store.SaveDebounced(_order);
+        RebuildFlat(_lastForeground);
+        KeepSelection();
+        StateChanged?.Invoke();
+        return true;
     }
 
     /// <summary>Activate a window directly (quick jump path — no overlay,
@@ -1151,6 +1345,7 @@ public sealed class SwitcherController
     {
         _order = _store.Load();
         _pinHwnd.Clear(); // 新 pin 实例 — 旧 hwnd 跟踪全部作废
+        _quickHwnd.Clear();
         Refresh();
         StateChanged?.Invoke();
     }

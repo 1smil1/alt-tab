@@ -32,6 +32,35 @@ public sealed class OrderFile
     /// <summary>Windows pinned to numbered slots (1..10). Pin fixes the
     /// NUMBER, not the position — unpinned windows flow around them.</summary>
     public List<PinDefinition> Pins { get; set; } = new();
+
+    /// <summary>一次直达号码 (面板关闭时 Alt+N) 的指派, 与位置编号解耦.
+    /// 任何卡都可以有 (不要求固定); 没指派 = 回落到该卡的位置编号, 也就是
+    /// 旧行为. 单独一张表而不是 PinDefinition 的字段: pin 会硬占位置号,
+    /// 而未固定的卡也需要自己的号码.</summary>
+    public List<QuickNumberDef> QuickNumbers { get; set; } = new();
+}
+
+/// <summary>一次直达号码指派. 身份与 <see cref="PinDefinition"/> 完全同一
+/// 套 (GroupKey + Title), 因此共用 FollowPinTitles 的标题跟随/休眠机制.</summary>
+public sealed class QuickNumberDef
+{
+    public QuickNumberDef() { }
+
+    public QuickNumberDef(string groupKey, string title, int number)
+    {
+        GroupKey = groupKey;
+        Title = title;
+        Number = number;
+    }
+
+    /// <summary>Stable identity, matches <see cref="WindowEntry.GroupKey"/>.</summary>
+    public string GroupKey { get; set; } = string.Empty;
+
+    /// <summary>The window title at assignment time.</summary>
+    public string Title { get; set; } = string.Empty;
+
+    /// <summary>1..10. 10 号由键 0 输入 (键只有 0-9).</summary>
+    public int Number { get; set; } = 1;
 }
 
 /// <summary>A pinned window. Windows are ephemeral (hwnd dies with the

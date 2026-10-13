@@ -766,6 +766,171 @@ public partial class App : Application
         var ch18 = SwitcherController.FollowPinTitles(pins18, new List<WindowEntry>(), map18);
         Check("pin-follow-window-gone", !ch18 && pins18.Count == 1 && pin18.Title == "a.py - proj");
 
+        // ---------- 一次直达号码 (快捷键号) 与位置号解耦 ----------
+
+        static List<QuickNumberDef> Q(params (string title, int n)[] q) =>
+            q.Select(x => new QuickNumberDef("group:" + x.title, x.title, x.n)).ToList();
+
+        // 19. 没指派 → 号码回落位置号 (= 旧行为, 向后兼容). 0 号 (上一窗口) 和
+        //     -1 溢出卡没有 1..10 的位置号, 号码为 -1 = 不可直达.
+        var s19 = Slots("a", "b", "c", "d");
+        var none19 = new List<QuickNumberDef>();
+        Check("quick-default-falls-back-to-slot",
+            s19.Where(x => x.Slot >= 1 && x.Slot <= 10)
+                .All(x => SwitcherController.QuickNumberOf(x, none19) == x.Slot)
+            && SwitcherController.QuickNumberOf(s19[0], none19) == -1,
+            string.Join(',', s19.Select(x => $"{x.Slot}->{SwitcherController.QuickNumberOf(x, none19)}")));
+
+        // 20. 显式指派优先: 位置 6 的卡设成 3 → Alt+3 命中它, Alt+6 命中
+        //     位置 6 本来是谁.
+        var s20 = SwitcherController.AssignSlots(
+            new[] { "a", "b", "c", "d", "e", "f", "g" }.Select(W).ToList(),
+            new List<PinDefinition>());
+        var g20 = s20.First(x => x.Entry.Title == "g"); // 位置 6 (a 占 0 号)
+        var d20 = s20.First(x => x.Slot == 3);    // 原来占 3 号的卡
+        var q20 = Q(("g", 3));
+        Check("quick-explicit-beats-position",
+            g20.Slot == 6 && d20.Entry.Title != "g"
+            && SwitcherController.QuickCardHwnd(s20, q20, 3) == g20.Entry.Hwnd
+            && SwitcherController.QuickCardHwnd(s20, q20, 3) != d20.Entry.Hwnd,
+            $"位置6 的 g 设成快捷3 → Alt+3 命中 g (原来命中 {d20.Entry.Title})");
+
+        // 21. 键 0 ↔ 号码 10 互转.
+        Check("quick-key-zero-is-ten",
+            SwitcherController.NumberForKey(0) == 10 && SwitcherController.KeyForNumber(10) == 0
+            && SwitcherController.NumberForKey(7) == 7 && SwitcherController.KeyForNumber(0) == 0);
+
+        // 22. Alt+0: 没指派 10 号 → 位置 0 (上一窗口, 旧行为); 指派了 → 那张卡.
+        var s22 = Slots("a", "b", "c");
+        var slot0h = s22.First(x => x.Slot == 0).Entry.Hwnd;
+        var withTen = Q(("c", 10));
+        Check("quick-zero-falls-back-to-previous-window",
+            SwitcherController.QuickCardHwnd(s22, new List<QuickNumberDef>(), 0) == slot0h
+            && SwitcherController.QuickCardHwnd(s22, withTen, 0) == s22.First(x => x.Entry.Title == "c").Entry.Hwnd,
+            $"fallback={slot0h} explicit10=c");
+
+        // 23. 溢出卡 (Slot=-1) 只能靠显式号码命中 — 也是够到第 11 个窗口
+        //     的唯一办法.
+        var s23 = SwitcherController.AssignSlots(
+            Enumerable.Range(0, 13).Select(i => W($"w{i}")).ToList(),
+            new List<PinDefinition>());
+        var tail23 = s23.First(x => x.Slot == -1);
+        var q23 = Q(("w11", 7), ("w12", 7));
+        Check("quick-overflow-card-addressable",
+            tail23.Slot == -1
+            && SwitcherController.QuickCardHwnd(s23, q23, 7) == tail23.Entry.Hwnd,
+            $"overflow '{tail23.Entry.Title}' quick=7");
+
+        // 24. 复制卡不参与寻址: 号码指派落在 -2 复制卡上也不该被它抢走.
+        var s24 = SwitcherController.AssignSlots(
+            new[] { "a", "b", "c", "d" }.Select(W).ToList(), new List<PinDefinition>(),
+            W("a").Hwnd);
+        var copy24 = s24.First(x => x.IsCurrentCopy);
+        var q24 = Q(("a", 4));
+        Check("quick-skips-current-copy",
+            copy24.IsCurrentCopy
+            && SwitcherController.QuickCardHwnd(s24, q24, 4)
+                == s24.First(x => x.Entry.Title == "a" && !x.IsCurrentCopy).Entry.Hwnd,
+            $"copy slot={copy24.Slot}, 命中真身卡");
+
+        // 25. 冲突互斥: B 抢 5 → A 的指派被清掉, 返回 A 供上层提示.
+        var q25 = Q(("a", 5));
+        var stolen25 = SwitcherController.AssignQuick(q25, "group:b", "b", 5, 9);
+        Check("quick-conflict-clears-previous",
+            stolen25 is { } victim && victim.Title == "a"
+            && q25.Count == 1 && q25[0].Title == "b" && q25[0].Number == 5,
+            $"顶掉 '{stolen25?.Title}', 剩 {q25.Count} 条");
+
+        // 26. 号码 == 位置号 → 不落盘 (回落已经覆盖, order.json 保持干净).
+        var q26 = Q(("a", 3));
+        var stolen26 = SwitcherController.AssignQuick(q26, "group:b", "b", 3, 3);
+        Check("quick-same-as-position-not-stored",
+            stolen26 is null && q26.Count == 1 && q26[0].Title == "a",
+            $"b 设成自己的位置号 3 → 不落盘, 剩 {q26.Count} 条");
+
+        // 27. 改回位置号 = 撤销指派.
+        var q27 = Q(("a", 3), ("b", 8));
+        var stolen27 = SwitcherController.AssignQuick(q27, "group:b", "b", 8, 8);
+        Check("quick-reset-clears-own-assignment",
+            stolen27 is null && q27.Count == 1 && q27[0].Title == "a",
+            $"b 改回位置号 8 → 剩 {q27.Count} 条");
+
+        // 28. 快捷号码的标题跟随 (与 pin 同一套身份机制).
+        var q28 = new List<QuickNumberDef> { new("group:app", "a.py - proj", 5) };
+        var map28 = new Dictionary<QuickNumberDef, IntPtr>
+            { [q28[0]] = hwnd16 };
+        var ch28 = SwitcherController.FollowPinTitles(new List<PinDefinition>(), mru16,
+            new Dictionary<PinDefinition, IntPtr>(), q28, map28);
+        Check("quick-follows-title",
+            ch28 && q28.Count == 1 && q28[0].Title == "b.py - proj" && map28[q28[0]] == hwnd16);
+
+        // 29. 窗口已关 → 快捷号码维持休眠 (不清除).
+        var q29 = new List<QuickNumberDef> { new("group:app", "a.py - proj", 5) };
+        var map29 = new Dictionary<QuickNumberDef, IntPtr> { [q29[0]] = hwnd16 };
+        var ch29 = SwitcherController.FollowPinTitles(new List<PinDefinition>(),
+            new List<WindowEntry>(), new Dictionary<PinDefinition, IntPtr>(), q29, map29);
+        Check("quick-dormant-when-window-gone",
+            !ch29 && q29.Count == 1 && q29[0].Number == 5);
+
+        // ---------- 编辑模式移动 (固定规则全部解除) ----------
+
+        // 30. 拖固定卡 = 取消固定, 且不再受 PinsAnchored 约束.
+        var base30 = new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("b"), 1, false),
+            new(W("c"), 3, true),
+            new(W("d"), 4, false),
+        };
+        var moved30 = SwitcherController.EditMove(base30, 2, 3, before: false);
+        var c30 = moved30.First(x => x.Entry.Title == "c");
+        Check("edit-move-unpins-card",
+            !c30.IsPinned && c30.Entry.Title == "c"
+            && moved30.Last().Entry.Title == "c",
+            string.Join(',', moved30.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
+
+        // 31. 被拖的固定卡取消固定后, 别的固定卡编号一个都不许动.
+        var base31 = new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("b"), 3, true),
+            new(W("c"), 5, true),
+            new(W("d"), 6, false),
+        };
+        var moved31 = SwitcherController.EditMove(base31, 3, 1, before: true);
+        Check("edit-move-keeps-other-pins",
+            moved31.First(x => x.Entry.Title == "b").Slot == 3
+            && moved31.First(x => x.Entry.Title == "b").IsPinned
+            && moved31.First(x => x.Entry.Title == "c").Slot == 5
+            && SwitcherController.PinsAnchored(moved31),
+            string.Join(',', moved31.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
+
+        // 32. slot 0 卡被拖 = 并入流编号, 不再是特殊最左.
+        var base32 = new List<SlotWindow>
+        {
+            new(W("a"), 0, false),
+            new(W("b"), 1, false),
+            new(W("c"), 2, false),
+        };
+        var moved32 = SwitcherController.EditMove(base32, 0, 2, before: false);
+        var a32 = moved32.First(x => x.Entry.Title == "a");
+        Check("edit-move-slot-zero-joins-flow",
+            a32.IsCurrentCopy == false && moved32.Last().Entry.Title == "a" && a32.Slot == 3,
+            string.Join(',', moved32.Select(x => $"{x.Entry.Title}:{x.Slot}")));
+
+        // 33. 复制卡 (-2) 在编辑模式下也不动 — 拖它是别名, 真身另有其卡.
+        var base33 = new List<SlotWindow>
+        {
+            new(W("a"), -2, false) { IsCurrentCopy = true },
+            new(W("b"), 0, false),
+            new(W("c"), 1, false),
+        };
+        var moved33 = SwitcherController.EditMove(base33, 0, 2, before: false);
+        Check("edit-move-current-copy-untouched",
+            moved33.Count == 3 && moved33[0].IsCurrentCopy && moved33[0].Slot == -2
+            && moved33[1].Slot == 0 && moved33[2].Slot == 1,
+            string.Join(',', moved33.Select(x => $"{x.Entry.Title}:{x.Slot}")));
+
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
     }
