@@ -46,6 +46,7 @@ public partial class SettingsWindow : Window
         QuickMinBox.IsChecked = cfg.QuickMinimizeOnSame ?? true;
         QuickMinPinnedBox.IsChecked = cfg.QuickMinimizePinnedOnSame
                                        ?? cfg.QuickMinimizeOnSame ?? true;
+        GlowBox.IsChecked = cfg.SelectionGlow ?? true;
         ValidateHotkey();
     }
 
@@ -109,6 +110,7 @@ public partial class SettingsWindow : Window
         cfg.CommitMinimizePinnedOnSame = CommitMinPinnedBox.IsChecked == true;
         cfg.QuickMinimizeOnSame = QuickMinBox.IsChecked == true;
         cfg.QuickMinimizePinnedOnSame = QuickMinPinnedBox.IsChecked == true;
+        cfg.SelectionGlow = GlowBox.IsChecked == true;
         // 注册表即时落盘 (cfg.Save 失败也不会回滚勾选状态 — 用户至少知道
         // 应用层记住了, 手动重勾可恢复).
         AutoStartService.Apply(cfg.AutoStart == true, AutoStartService.GetCurrentExePath());

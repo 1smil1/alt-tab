@@ -349,6 +349,7 @@ public partial class App : Application
         _controller?.ReloadConfig();      // 先刷新 controller 缓存 —
                                           // ApplyHotkeyConfig 读的就是它
         ApplyHotkeyConfig(_keyboard!);
+        _overlay?.RefreshGlowSetting(); // 选中光晕开关热生效 (卡已建, 不重建)
     }
 
     // ---------- 可配置热键 + 一次直达 (config.json → hook) ----------

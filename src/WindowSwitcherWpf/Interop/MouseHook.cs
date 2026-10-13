@@ -81,24 +81,28 @@ public sealed class MouseHook : IDisposable
 
     private void HookThreadPump()
     {
+        // 代际隔离 — 同 KeyboardHook: 只卸自己的局部 hook, 且只有仍是当前代
+        // 才写共享状态. 否则 Dispose→Install 交接时旧线程把新 hook 卸掉.
+        var me = Thread.CurrentThread;
+        IntPtr myHook = IntPtr.Zero;
         try
         {
             _pumpThreadId = GetCurrentThreadId();
             var hMod = GetModuleHandleW(null);
-            _hook = SetWindowsHookEx(WH_MOUSE_LL, _proc, hMod, 0);
-            if (_hook == IntPtr.Zero)
+            myHook = SetWindowsHookEx(WH_MOUSE_LL, _proc, hMod, 0);
+            if (myHook == IntPtr.Zero)
             {
                 var err = Marshal.GetLastWin32Error();
                 Log.Error("MouseHook", $"SetWindowsHookEx failed err={err}");
                 _ready!.Set();
                 return;
             }
+            _hook = myHook;
             Log.Info("MouseHook", "installed (dedicated pump thread)");
-            _ready!.Set();
-            // 先标 alive 再进 GetMessageW 阻塞, 否则 2s 看守者 tick 读
-            // IsPumpAlive 仍为 false (没人标过 true) → 误判死, Dispose+
-            // Install 循环.
+            // 先标 alive 再放行 Install() 的 _ready.Wait — 否则看守者第一拍
+            // 可能读到 false → 误判死.
             _pumpAlive = true;
+            _ready!.Set();
             while (!_stopRequested)
             {
                 if (GetMessageW(out var msg, IntPtr.Zero, 0, 0) > 0)
@@ -120,9 +124,12 @@ public sealed class MouseHook : IDisposable
         }
         finally
         {
-            _pumpAlive = false; // 任何退出路径都标 false — 让 watchdog 立刻看见死亡
-            try { UnhookWindowsHookEx(_hook); } catch { }
-            _hook = IntPtr.Zero;
+            if (ReferenceEquals(_pumpThread, me))
+            {
+                _pumpAlive = false; // 让 watchdog 立刻看见死亡
+                _hook = IntPtr.Zero;
+            }
+            try { if (myHook != IntPtr.Zero) UnhookWindowsHookEx(myHook); } catch { }
             Log.Info("MouseHook", "pump exited, hook removed");
         }
     }

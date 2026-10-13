@@ -50,6 +50,10 @@ public sealed class ConfigFile
 
     /// <summary>同上, 但只对固定标签生效. null = 跟随 QuickMinimizeOnSame.</summary>
     public bool? QuickMinimizePinnedOnSame { get; set; }
+
+    /// <summary>选中卡时外围闪一圈浅蓝光然后渐隐 (普通卡 / 堆叠头 /
+    /// 子页面成员都吃). null = 默认 true.</summary>
+    public bool? SelectionGlow { get; set; }
 }
 
 /// <summary>手动堆叠 (自定义集中): an ordered set of windows collapsed into

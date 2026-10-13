@@ -87,6 +87,9 @@
             <Border Background="#FF2A2A2A" CornerRadius="8"
                     Padding="14,10" Margin="0,8,0,16">
                 <StackPanel>
+                    <CheckBox x:Name="GlowBox" Margin="0,0,0,10"
+                              Foreground="#FFE0E0E0"
+                              Content="选中时外围闪一圈浅蓝光（普通卡 / 堆叠头 / 子页面成员）"/>
                     <TextBlock Text="面板内提交（方向键 / Alt+Tab 循环后松开 Alt）"
                                Foreground="#FFE0E0E0"/>
                     <CheckBox x:Name="CommitMinBox" Margin="0,6,0,0"
