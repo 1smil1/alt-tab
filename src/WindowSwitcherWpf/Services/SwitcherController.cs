@@ -1090,15 +1090,14 @@ public sealed class SwitcherController
         return IntPtr.Zero;
     }
 
-    /// <summary>给某卡指派一次直达号码 (编辑模式). 号码与该卡当前位置号
-    /// 相同 = 不落盘 (回落已经覆盖). 冲突互斥: 抢走别人的号码时把对方的
-    /// 指派删掉, 并把对方的 def 退回给调用方去提示. 与位置号相同 ⇒ 顺手
-    /// 清掉自己已有的指派. 返回被清掉的 def (null = 无冲突).</summary>
+    /// <summary>给某卡指派一次直达号码 (编辑模式). 用户手动设过的号码
+    /// **一律落盘并一直显示** (哪怕等于位置号 — "这是我自己的修改, 要固定,
+    /// 要一直显示"). 冲突互斥: 抢走别人的号码时把对方的指派删掉, 并把
+    /// 对方的 def 退回给调用方去提示. 返回被清掉的 def (null = 无冲突).</summary>
     public static QuickNumberDef? AssignQuick(List<QuickNumberDef> quicks,
-        string groupKey, string title, int number, int slot)
+        string groupKey, string title, int number)
     {
         quicks.RemoveAll(q => q.GroupKey == groupKey && q.Title == title);
-        if (number == slot) return null; // 与位置号一致 — 不需要指派
         QuickNumberDef? stolen = null;
         for (var i = 0; i < quicks.Count; i++)
             if (quicks[i].Number == number)
@@ -1110,6 +1109,20 @@ public sealed class SwitcherController
         quicks.Add(new QuickNumberDef(groupKey, title, number));
         return stolen;
     }
+
+    /// <summary>该卡**手动指派**过的一次直达号; 没指派 = null (别与
+    /// <see cref="QuickNumberOf"/> 的回落混起来 — 角标靠它决定要不要显示
+    /// 括号段).</summary>
+    public static int? ExplicitQuickOf(SlotWindow sw, List<QuickNumberDef> quicks)
+    {
+        foreach (var q in quicks)
+            if (q.GroupKey == sw.Entry.GroupKey && q.Title == sw.Entry.Title)
+                return q.Number;
+        return null;
+    }
+
+    /// <summary>overlay 渲染用: 该卡手动设过的快捷号 (null = 没设过).</summary>
+    public int? ExplicitQuickFor(SlotWindow sw) => ExplicitQuickOf(sw, _order.QuickNumbers);
 
     /// <summary>overlay 渲染用: 该卡当前生效的一次直达号码.</summary>
     public int QuickNumberFor(SlotWindow sw) => QuickNumberOf(sw, _order.QuickNumbers);
@@ -1125,7 +1138,7 @@ public sealed class SwitcherController
               ?? Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd && !s.IsCurrentCopy);
         if (sw is null) return null;
         var stolen = AssignQuick(_order.QuickNumbers, sw.Entry.GroupKey, sw.Entry.Title,
-            number, sw.Slot);
+            number);
         _store.SaveDebounced(_order);
         RebuildFlat(_lastForeground);
         KeepSelection();

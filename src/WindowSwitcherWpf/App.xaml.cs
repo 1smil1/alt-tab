@@ -857,25 +857,29 @@ public partial class App : Application
 
         // 25. 冲突互斥: B 抢 5 → A 的指派被清掉, 返回 A 供上层提示.
         var q25 = Q(("a", 5));
-        var stolen25 = SwitcherController.AssignQuick(q25, "group:b", "b", 5, 9);
+        var stolen25 = SwitcherController.AssignQuick(q25, "group:b", "b", 5);
         Check("quick-conflict-clears-previous",
             stolen25 is { } victim && victim.Title == "a"
             && q25.Count == 1 && q25[0].Title == "b" && q25[0].Number == 5,
             $"顶掉 '{stolen25?.Title}', 剩 {q25.Count} 条");
 
-        // 26. 号码 == 位置号 → 不落盘 (回落已经覆盖, order.json 保持干净).
-        var q26 = Q(("a", 3));
-        var stolen26 = SwitcherController.AssignQuick(q26, "group:b", "b", 3, 3);
-        Check("quick-same-as-position-not-stored",
-            stolen26 is null && q26.Count == 1 && q26[0].Title == "a",
-            $"b 设成自己的位置号 3 → 不落盘, 剩 {q26.Count} 条");
+        // 26. 号码 == 位置号也照样落盘并显示 (用户: 自己改的要"固定", 一直
+        // 显示) — 只有 ClearQuickNumber 才真的撤销.
+        var q26 = Q(("a", 7));
+        var stolen26 = SwitcherController.AssignQuick(q26, "group:b", "b", 3);
+        Check("quick-same-as-position-still-stored",
+            stolen26 is null && q26.Count == 2 && q26[1].Title == "b"
+            && q26[1].Number == 3
+            && SwitcherController.ExplicitQuickOf(
+                new SlotWindow(W("b"), 3, false), q26) == 3,
+            $"b 设成自己的位置号 3 → 仍落盘, 剩 {q26.Count} 条");
 
-        // 27. 改回位置号 = 撤销指派.
-        var q27 = Q(("a", 3), ("b", 8));
-        var stolen27 = SwitcherController.AssignQuick(q27, "group:b", "b", 8, 8);
-        Check("quick-reset-clears-own-assignment",
-            stolen27 is null && q27.Count == 1 && q27[0].Title == "a",
-            $"b 改回位置号 8 → 剩 {q27.Count} 条");
+        // 27. 重设同一个号 = 替换自己那条, 不算冲突.
+        var q27 = Q(("b", 8));
+        var stolen27 = SwitcherController.AssignQuick(q27, "group:b", "b", 8);
+        Check("quick-reset-keeps-single-entry",
+            stolen27 is null && q27.Count == 1 && q27[0].Title == "b" && q27[0].Number == 8,
+            $"b 重设 8 → 剩 {q27.Count} 条");
 
         // 28. 快捷号码的标题跟随 (与 pin 同一套身份机制).
         var q28 = new List<QuickNumberDef> { new("group:app", "a.py - proj", 5) };
@@ -953,12 +957,12 @@ public partial class App : Application
             && moved33[1].Slot == 0 && moved33[2].Slot == 1,
             string.Join(',', moved33.Select(x => $"{x.Entry.Title}:{x.Slot}")));
 
-        // 34. 角标文本: 快捷号 == 位置号 → 单数字; 不等 → "2(5)".
-        Check("badge-single-number-when-equal",
+        // 34. 角标文本: 没设过 → 单数字; 设过 (哪怕 == 位置号) → "5(5)".
+        Check("badge-pair-when-same-number",
             new OverlayWindow(W("a"), "group:a", 0)
                 { SlotBadge = "5", SlotValue = 5, QuickNumber = null }.BadgeText == "5"
             && new OverlayWindow(W("a"), "group:a", 0)
-                { SlotBadge = "5", SlotValue = 5, QuickNumber = 5 }.BadgeText == "5");
+                { SlotBadge = "5", SlotValue = 5, QuickNumber = 5 }.BadgeText == "5(5)");
 
         // 35. 溢出卡没有位置号 (badge 为空), 但设了快捷号就显示它.
         Check("badge-pair-when-different",

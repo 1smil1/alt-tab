@@ -291,11 +291,10 @@ public partial class SwitcherOverlay : Window
         if (ow.IsCurrentCopy) return; // 副本卡没有自己的号码
         ClearQuickEditPending();
         _quickEditHwnd = ow.Hwnd;
-        // 原值 = 显式指派; 跟位置号相同时 AssignQuick 不会落表, 所以回落即 null.
+        // 原值 = 手动设过的快捷号 (没设过 = null, Esc 时清掉).
         var sw = _controller.Slotted.FirstOrDefault(
             s => s.Entry.Hwnd == ow.Hwnd && !s.IsCurrentCopy);
-        _quickEditOriginal = sw is not null && _controller.QuickNumberFor(sw) is var q
-            && q != sw.Slot ? q : null;
+        _quickEditOriginal = sw is null ? null : _controller.ExplicitQuickFor(sw);
         ShowStatus("输入数字设快捷号 (0=10) · Esc 取消", 8000);
         WindowSwitcherWpf.Services.Log.Info("Overlay",
             $"quick edit start '{ow.DisplayTitle}' hwnd=0x{ow.Hwnd.ToInt64():X}");
@@ -456,8 +455,7 @@ public partial class SwitcherOverlay : Window
                     SlotValue = sw.Slot,
                     // 位置号 != 快捷号时才显示成 "位置(快捷)" (未指派 = 回落
                     // 位置号 = null, 与位置号相同时也是 null).
-                    QuickNumber = _controller.QuickNumberFor(sw) is var qn && qn != sw.Slot
-                        ? qn : null,
+                    QuickNumber = _controller.ExplicitQuickFor(sw),
                     // 待定改号的那张卡闪烁 (state 存 hwnd, 因为每次重建)
                     IsQuickEditing = _quickEditHwnd == sw.Entry.Hwnd,
                     IsPinned = sw.IsPinned,
@@ -2642,19 +2640,18 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
     /// (= 旧行为, 不显示额外信息).</summary>
     public int? QuickNumber { get; init; }
 
-    /// <summary>角标文本: 位置号 == 快捷号就只显示一个数字; 不同时显示
-    /// "2(5)" = 在位置 2, Alt+5 直达.</summary>
+    /// <summary>角标文本: 手动设过快捷号就一直显示 — 相同也显示 "5(5)"
+    /// (用户: "我自己改的要一直显示"); 没设过就只显示位置号.</summary>
     public string BadgeText =>
-        QuickNumber is { } q && !string.IsNullOrEmpty(SlotBadge) && q != SlotValue
+        QuickNumber is { } q && !string.IsNullOrEmpty(SlotBadge)
             ? $"{SlotBadge}({q})"
             : SlotBadge;
 
-    /// <summary>角标里独立的 "(快捷号)" 部分 (位置号之后). 没指派/等于
-    /// 位置号 → 空, 整个第二段隐藏.</summary>
+    /// <summary>角标里独立的 "(快捷号)" 部分 (位置号之后). 没手动设过 →
+    /// 空; 进了改号态还没输数字 → "(?)" 闪着.</summary>
     public string QuickSuffix =>
-        QuickNumber is { } q && !string.IsNullOrEmpty(SlotBadge) && q != SlotValue
+        QuickNumber is { } q && !string.IsNullOrEmpty(SlotBadge)
             ? $"({q})"
-            // 还没指派过快捷号: 进改号态要有个能闪的东西, 否则点了跟没点一样
             : IsQuickEditing ? "(?)" : "";
     public System.Windows.Visibility QuickBadgeVisibility =>
         QuickSuffix.Length == 0
