@@ -1024,6 +1024,20 @@ public partial class App : Application
             e39.Count == 3 && !e39[0].IsCurrentCopy && e39[0].Slot == 4 && e39[0].IsPinned,
             string.Join(',', e39.Select(x => $"{x.Entry.Title}:{x.Slot}{(x.IsPinned ? "!" : "")}")));
 
+        // 40. 手动设的快捷号对每张卡都算数 — 包括当前窗口卡 (-2) 与 0 号上一
+        //     窗口卡 (用户: "上一个标签锁定成 alt 1, alt 1 就该切它").
+        var s40 = new List<SlotWindow>
+        {
+            new(W("a"), -2, false) { IsCurrentCopy = true },
+            new(W("b"), 0, false),
+            new(W("c"), 1, false),
+        };
+        Check("quick-reaches-special-cards",
+            SwitcherController.QuickCardHwnd(s40, Q(("a", 1)), 1) == W("a").Hwnd
+            && SwitcherController.QuickCardHwnd(s40, Q(("b", 1)), 1) == W("b").Hwnd
+            && SwitcherController.QuickCardHwnd(s40, new List<QuickNumberDef>(), 1) == W("c").Hwnd,
+            "a/b 显式号码优先, 无指派才回落位置 1");
+
         WindowSwitcherWpf.Services.Log.Info("SlotTests", "done");
         Environment.Exit(0);
     }

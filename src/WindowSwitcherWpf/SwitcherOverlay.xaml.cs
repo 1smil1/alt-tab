@@ -288,12 +288,10 @@ public partial class SwitcherOverlay : Window
     {
         if (!EditMode || _controller.IsInStackView) return;
         if (sender is not FrameworkElement { DataContext: OverlayWindow ow }) return;
-        if (ow.IsCurrentCopy) return; // 副本卡没有自己的号码
         ClearQuickEditPending();
         _quickEditHwnd = ow.Hwnd;
         // 原值 = 手动设过的快捷号 (没设过 = null, Esc 时清掉).
-        var sw = _controller.Slotted.FirstOrDefault(
-            s => s.Entry.Hwnd == ow.Hwnd && !s.IsCurrentCopy);
+        var sw = _controller.Slotted.FirstOrDefault(s => s.Entry.Hwnd == ow.Hwnd);
         _quickEditOriginal = sw is null ? null : _controller.ExplicitQuickFor(sw);
         ShowStatus("输入数字设快捷号 (0=10) · Esc 取消", 8000);
         WindowSwitcherWpf.Services.Log.Info("Overlay",

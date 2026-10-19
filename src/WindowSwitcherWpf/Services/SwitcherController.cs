@@ -1081,21 +1081,19 @@ public sealed class SwitcherController
 
     /// <summary>overlay 关闭时 Alt+N 的解析. 第一遍找显式指派 (含 10 号
     /// ← 键 0), 首个命中即返回; 第二遍回落到位置号 — 逐字复刻旧
-    /// SlotCardHwnd 的行为 (键 0 → 位置 0 的上一窗口卡). 复制卡两遍都
-    /// 跳过; 溢出卡 (Slot=-1) 只能靠显式号码命中.</summary>
+    /// SlotCardHwnd 的行为 (键 0 → 位置 0 的上一窗口卡). 第一遍**不跳过**
+    /// 任何卡: 用户手动给的号码对每张卡都算数, 包括当前窗口卡 (-2) 与
+    /// 0 号上一窗口卡 (用户: "上一个标签被锁定成 alt 1, alt 1 就该切它").
+    /// 第二遍才跳过复制卡 —— 位置号回落沿用旧语义. 溢出卡 (Slot=-1) 只能
+    /// 靠显式号码命中.</summary>
     public static IntPtr QuickCardHwnd(IReadOnlyList<SlotWindow> slots,
         List<QuickNumberDef> quicks, int digit)
     {
         foreach (var sw in slots)
-        {
-            // 当前窗口卡只有在"没有号" (Slot=-2) 时不参与寻址; 它带着固定号
-            // 的时候就是一张正常的固定卡 (用户: 一个窗口只留一张卡).
-            if (sw.IsCurrentCopy && sw.Slot < 1) continue;
             foreach (var q in quicks)
                 if (q.GroupKey == sw.Entry.GroupKey && q.Title == sw.Entry.Title
                     && KeyForNumber(q.Number) == digit)
                     return sw.Entry.Hwnd;
-        }
         foreach (var sw in slots)
         {
             if (sw.IsCurrentCopy && sw.Slot < 1) continue;
@@ -1147,9 +1145,12 @@ public sealed class SwitcherController
     {
         if (_inStackView) return null; // 子页面数字是相对成员序号
         if (number is < 1 or > 10) return null;
+        // 真身优先 (同 hwnd 双卡时点真身的 📌 才不会误操作副本), 但当前窗口卡
+        // 现在就是那唯一一张 — 兜底必须能落到它身上, 否则给"上一个/当前
+        // 标签"设快捷号会静默失败 (它没有真身).
         var sw = Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd
                        && !s.IsCurrentCopy && !s.IsSlot0Copy)
-              ?? Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd && !s.IsCurrentCopy);
+              ?? Slotted.FirstOrDefault(s => s.Entry.Hwnd == hwnd);
         if (sw is null) return null;
         var stolen = AssignQuick(_order.QuickNumbers, sw.Entry.GroupKey, sw.Entry.Title,
             number);
