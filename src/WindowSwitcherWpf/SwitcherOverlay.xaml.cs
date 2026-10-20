@@ -34,6 +34,7 @@ public partial class SwitcherOverlay : Window
         InitializeComponent();
         DataContext = this;
         WindowsList.ItemsSource = _windows;
+        DesktopBar.ItemsSource = _desktops;
 
         // Match the native Alt+Tab switcher width: measured 2140px on a
         // 2560px work area (factor 0.836). Content beyond these caps
@@ -82,6 +83,65 @@ public partial class SwitcherOverlay : Window
     }
 
     public ObservableCollection<OverlayWindow> AllWindows => _windows;
+
+    // ---------- 虚拟桌面槽位行 ----------
+
+    /// <summary>面板里点了某个桌面槽位 → App 层收掉面板并切桌面
+    /// (面板属于当前桌面, 留着会被切走).</summary>
+    public event Action<int>? DesktopSwitchRequested;
+
+    private readonly ObservableCollection<DesktopChip> _desktops = new();
+
+    /// <summary>刷新桌面槽位行 (序号 + 名字 + 当前高亮). 桌面数 &lt; 2 时
+    /// 隐藏 — 只有一个桌面没什么可切的, 不占面板空间.</summary>
+    private void RefreshDesktops()
+    {
+        var list = VirtualDesktop.List();
+        var current = VirtualDesktop.CurrentGuid;
+        _desktops.Clear();
+        foreach (var d in list)
+        {
+            _desktops.Add(new DesktopChip(d.Index, d.Id,
+                string.IsNullOrWhiteSpace(d.Name)
+                    ? $"桌面 {d.Index + 1}"
+                    : $"{d.Index + 1} {d.Name}",
+                d.Id == current));
+        }
+        DesktopBarRow.Visibility = list.Count >= 1 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnNewDesktopClick(object sender, MouseButtonEventArgs e)
+    {
+        var created = VirtualDesktop.Create();
+        if (created is null) return;
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"new desktop created: {created.Index + 1} ({created.Id})");
+        RefreshDesktops();
+    }
+
+    private void OnDesktopChipClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is DesktopChip chip)
+        {
+            WindowSwitcherWpf.Services.Log.Info("Overlay",
+                $"desktop chip click → {chip.Label}");
+            DesktopSwitchRequested?.Invoke(chip.Index);
+        }
+    }
+
+    /// <summary>指针下的桌面槽位 (坐标相对 DesktopBar).</summary>
+    private DesktopChip? DesktopChipAt(Point p)
+    {
+        for (var i = 0; i < _desktops.Count; i++)
+        {
+            if (DesktopBar.ItemContainerGenerator.ContainerFromIndex(i) is not ContentPresenter cp) continue;
+            if (DesktopBar.ItemTemplate?.FindName("DesktopChip", cp) is not FrameworkElement chip) continue;
+            var pos = chip.TransformToVisual(DesktopBar).Transform(new Point(0, 0));
+            var r = new Rect(pos, new Point(chip.ActualWidth, chip.ActualHeight));
+            if (r.Contains(p)) return _desktops[i];
+        }
+        return null;
+    }
 
     protected override void OnSourceInitialized(EventArgs e)
     {
@@ -138,6 +198,7 @@ public partial class SwitcherOverlay : Window
         {
             _controller.OpenOverlay();
             Rebuild();
+            RefreshDesktops();
             try
             {
                 Show();
@@ -515,6 +576,9 @@ public partial class SwitcherOverlay : Window
         var sub = _controller.IsInStackView;
         MainHeader.Visibility = sub ? Visibility.Collapsed : Visibility.Visible;
         StackHeader.Visibility = sub ? Visibility.Visible : Visibility.Collapsed;
+        // 子页面是"堆叠内部" — 桌面槽位行只对主页面有意义.
+        if (sub) DesktopBarRow.Visibility = Visibility.Collapsed;
+        else if (_desktops.Count >= 1) DesktopBarRow.Visibility = Visibility.Visible;
         if (!sub) return;
         var info = _controller.ActiveStackInfo!;
         StackTitleText.Text = info.Head.DisplayTitle;
@@ -2255,6 +2319,24 @@ public partial class SwitcherOverlay : Window
         var fromStrip = _dragFromFanStrip;
         EndDrag();
         if (dragHwnd == IntPtr.Zero) return;
+        // 编辑模式: 拖到桌面槽位上 = 把窗口迁到那个桌面 (迁走后它离开当前
+        // 桌面, 面板里这张卡随之消失).
+        if (EditMode && !_controller.IsInStackView && _desktops.Count >= 2)
+        {
+            var chip = DesktopChipAt(e.GetPosition(DesktopBar));
+            if (chip is not null)
+            {
+                if (chip.Id != VirtualDesktop.CurrentGuid
+                    && _controller.MoveToDesktop(dragHwnd, chip.Id))
+                {
+                    WindowSwitcherWpf.Services.Log.Info("Overlay",
+                        $"migrate window → {chip.Label}");
+                    RefreshDesktops();
+                    RebuildFromSlots(preserveScroll: true);
+                }
+                return;
+            }
+        }
         var p = e.GetPosition(WindowsList);
         if (fromStrip)
         {
@@ -2823,3 +2905,41 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
 /// <summary>One fan-strip layer of a stack card: a colored sliver standing
 /// for the member behind the face card (click activates it, dragging it
 /// away peels it out of the stack).</summary>
+
+/// <summary>虚拟桌面槽位行的一格: 序号 + GUID + 显示名 + 是否当前桌面.
+/// GUID 是稳定标识 (桌面序号会因删桌面漂移, GUID 不会).</summary>
+public sealed class DesktopChip : System.ComponentModel.INotifyPropertyChanged
+{
+    private bool _isCurrent;
+
+    public DesktopChip(int index, Guid id, string label, bool isCurrent)
+    {
+        Index = index;
+        Id = id;
+        Label = label;
+        _isCurrent = isCurrent;
+    }
+
+    /// <summary>0 基序号 (与 VirtualDesktop.DesktopInfo.Index 一致).</summary>
+    public int Index { get; }
+
+    /// <summary>虚拟桌面 GUID.</summary>
+    public Guid Id { get; }
+
+    /// <summary>显示文本 ("桌面 2" / "2 我的工作").</summary>
+    public string Label { get; }
+
+    /// <summary>是否当前桌面 (高亮).</summary>
+    public bool IsCurrent
+    {
+        get => _isCurrent;
+        set
+        {
+            if (_isCurrent == value) return;
+            _isCurrent = value;
+            PropertyChanged?.Invoke(this, new(nameof(IsCurrent)));
+        }
+    }
+
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+}

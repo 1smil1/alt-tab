@@ -156,6 +156,17 @@ public sealed class SwitcherController
 
     private bool _editLayout;   // 编辑模式布局 (SetEditLayout), 每次 RebuildFlat 生效
 
+    /// <summary>把窗口迁到别的虚拟桌面 (公开 COM, vtable 稳定). 迁走后
+    /// 窗口不在当前桌面了 — 重新枚举 + 重排 (它会从面板里消失).</summary>
+    public bool MoveToDesktop(IntPtr hwnd, Guid desktopId)
+    {
+        if (!VirtualDesktop.MoveWindowToDesktop(hwnd, desktopId)) return false;
+        Refresh();
+        RebuildFlat(_lastForeground);
+        StateChanged?.Invoke();
+        return true;
+    }
+
     private void RebuildFlat(IntPtr foreground)
     {
         // 真 MRU 序 = 全局 z 序 (枚举原始序, 与 Groups 同一次 Refresh 的

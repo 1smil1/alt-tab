@@ -16,6 +16,7 @@ public partial class App : Application
     private static readonly Mutex? SingleInstanceMutex;
 
     private KeyboardHook? _keyboard;
+    private DesktopFocusTracker? _focusTracker;
     private MouseHook? _mouse;
     private System.Windows.Threading.DispatcherTimer? _watchdog;
     private OrderStore? _orderStore;
@@ -115,6 +116,17 @@ public partial class App : Application
         if (e.Args.Length > 0 && e.Args[0] == "--test-vd")
         {
             RunVirtualDesktopTests();
+            Shutdown();
+            return;
+        }
+
+        if (e.Args.Length > 0 && e.Args[0] == "--vd-create")
+        {
+            // 调试用: 新建一个虚拟桌面并打印它的序号/GUID.
+            var d = VirtualDesktop.Create();
+            Console.WriteLine(d is null
+                ? "create failed"
+                : $"created desktop {d.Index + 1} ({d.Id})");
             Shutdown();
             return;
         }
@@ -223,6 +235,11 @@ public partial class App : Application
 
         _overlay = new SwitcherOverlay(_controller);
         _overlay.Hide();
+        _overlay.DesktopSwitchRequested += OnDesktopSwitchRequested;
+
+        // 每个虚拟桌面上"最后聚焦的窗口" — 切桌面后拉回前台.
+        _focusTracker = new DesktopFocusTracker();
+        _focusTracker.Start();
 
         _keyboard = new KeyboardHook();
         ApplyHotkeyConfig(_keyboard);
@@ -427,8 +444,56 @@ public partial class App : Application
     private void OnVirtualDesktopSwitch(int digit)
     {
         var number = digit == 0 ? 10 : digit;
-        var ok = VirtualDesktop.SwitchTo(number - 1);
-        Log.Info("App", $"virtual desktop {digit} → 桌面{number} ok={ok}");
+        SwitchVirtualDesktop(number - 1);
+    }
+
+    /// <summary>面板里的桌面槽位被点: 收掉面板 (面板属于当前桌面, 留着会被
+    /// 切走) 再切桌面.</summary>
+    private void OnDesktopSwitchRequested(int index0)
+    {
+        _overlay?.Cancel();
+        SwitchVirtualDesktop(index0);
+    }
+
+    /// <summary>切到第 index0 个虚拟桌面 (0 基) + 恢复该桌面上次聚焦的窗口.
+    /// 切走前先记下当前桌面的焦点窗口 (供下次切回来时恢复).</summary>
+    private void SwitchVirtualDesktop(int index0)
+    {
+        var from = VirtualDesktop.CurrentGuid;
+        var fg = NativeMethods.GetForegroundWindow();
+        if (from != Guid.Empty) _focusTracker?.Remember(from, fg);
+        var ok = VirtualDesktop.SwitchTo(index0);
+        Log.Info("App", $"virtual desktop → 桌面{index0 + 1} ok={ok}");
+        if (!ok) return;
+        RestoreDesktopFocusLater();
+    }
+
+    /// <summary>切桌面是带动画的异步动作 — 立刻激活会失败 (窗口还没显示).
+    /// 等 150ms 激活一次, 失败再等 250ms 重试.</summary>
+    private void RestoreDesktopFocusLater()
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(150),
+        };
+        timer.Tick += (s, e) =>
+        {
+            timer.Stop();
+            var guid = VirtualDesktop.CurrentGuid;
+            if (guid != Guid.Empty && _focusTracker?.RestoreFocus(guid) == true) return;
+            var retry = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(250),
+            };
+            retry.Tick += (s2, e2) =>
+            {
+                retry.Stop();
+                var g2 = VirtualDesktop.CurrentGuid;
+                if (g2 != Guid.Empty) _focusTracker?.RestoreFocus(g2);
+            };
+            retry.Start();
+        };
+        timer.Start();
     }
 
     /// <summary>一次直达按下: 记住目标; 若目标是堆叠头, 启动 300ms 按住
@@ -1279,6 +1344,15 @@ public partial class App : Application
         // (槽位错 = 非托管崩溃, catch 不住).
         if (count >= 1 && current >= 0)
             Check("vd-switch-to-current", VirtualDesktop.SwitchTo(current));
+        // 桌面清单 (面板槽位行的数据源)
+        var list = VirtualDesktop.List();
+        Check("vd-list-count", list.Count == count, $"list={list.Count} count={count}");
+        Check("vd-list-index-seq",
+            list.Count == 0 || list.Select((d, i) => d.Index == i).All(x => x));
+        var curGuid = VirtualDesktop.CurrentGuid;
+        Check("vd-current-in-list",
+            curGuid == Guid.Empty || list.Any(d => d.Id == curGuid),
+            $"guid={curGuid}");
 
         WindowSwitcherWpf.Services.Log.Info("VdTests", "done");
         Environment.Exit(0);
@@ -1306,6 +1380,7 @@ public partial class App : Application
         //    在某条业务日志后戛然而止, 无 exit 标记.
         Log.Info("App", $"exit code={e.ApplicationExitCode}");
         _watchdog?.Stop();
+        _focusTracker?.Dispose();
         _tray?.Dispose();
         _mouse?.Dispose();
         _keyboard?.Dispose();

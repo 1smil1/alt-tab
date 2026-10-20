@@ -29,6 +29,7 @@
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
             <!-- Sub view banner (子标签页面): stack title + member count +
@@ -89,8 +90,76 @@
                         Click="OnSettingsClick"/>
             </StackPanel>
 
+            <!-- 桌面槽位行: 一行虚拟桌面徽章. 当前桌面高亮; 点 = 切过去;
+                 编辑模式下把卡片拖到某个槽位 = 把窗口迁到那个桌面. -->
+            <StackPanel x:Name="DesktopBarRow"
+                        Grid.Row="1"
+                        Orientation="Horizontal"
+                        HorizontalAlignment="Left"
+                        Margin="0,0,0,8"
+                        Visibility="Collapsed">
+                <ItemsControl x:Name="DesktopBar" VerticalAlignment="Center">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border x:Name="DesktopChip"
+                                Margin="0,0,6,0"
+                                Padding="9,3"
+                                CornerRadius="10"
+                                MouseLeftButtonUp="OnDesktopChipClick">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background" Value="#30FFFFFF"/>
+                                    <Setter Property="BorderBrush" Value="Transparent"/>
+                                    <Setter Property="BorderThickness" Value="2"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                            <Setter Property="Background" Value="#FF0078D4"/>
+                                            <Setter Property="BorderBrush" Value="#FF005A9E"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <TextBlock x:Name="DesktopChipText"
+                                       Text="{Binding Label}"
+                                       FontSize="12">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="#FF202020"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                                <Setter Property="Foreground" Value="White"/>
+                                                <Setter Property="FontWeight" Value="Bold"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+                <Border x:Name="NewDesktopChip"
+                        Margin="0,0,0,0"
+                        Padding="9,2"
+                        CornerRadius="10"
+                        Background="#20FFFFFF"
+                        BorderBrush="#50000000"
+                        BorderThickness="1"
+                        VerticalAlignment="Center"
+                        ToolTip="新建虚拟桌面"
+                        MouseLeftButtonUp="OnNewDesktopClick">
+                    <TextBlock Text="+" FontSize="13" FontWeight="Bold"
+                               Foreground="#FF404040"/>
+                </Border>
+            </StackPanel>
+
             <ScrollViewer x:Name="Scroller"
-                          Grid.Row="1"
+                          Grid.Row="2"
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
                 <ItemsControl x:Name="WindowsList" HorizontalAlignment="Left">

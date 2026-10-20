@@ -1,8 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using WindowSwitcherWpf.Services;
 
 namespace WindowSwitcherWpf.Interop;
+
+/// <summary>一个虚拟桌面: 序号 (0 基) + GUID (稳定标识) + 名字.</summary>
+public sealed record DesktopInfo(int Index, Guid Id, string Name);
 
 /// <summary>
 /// Windows 虚拟桌面 (Win10/11) 的最小 COM interop: 桌面数量 / 当前桌面 /
@@ -30,9 +34,18 @@ public static class VirtualDesktop
     /// <summary>本机 build 号 (22631 = Win11 23H2, 26100+ = 24H2).</summary>
     private static int Build => Environment.OSVersion.Version.Build;
 
+    /// <summary>UBR (修订号) — 同一 build 内的 COM 布局还会再变.</summary>
+    private static int Revision => Environment.OSVersion.Version.Revision;
+
     /// <summary>内部 COM 的 vtable 只在 23H2 (22621–26099) 上验证过.
     /// 24H2 起多了一个方法, 槽位会错位 → 宁可不支持, 也不乱调.</summary>
     private static bool InternalApiSupported => Build is >= 22621 and < 26100;
+
+    /// <summary>23H2 的 2921 变体 (CreateDesktop 多一个 IntPtr 参数).
+    /// 判据同上游 dankrusi 的 Loader: build ≥ 22621 且 revision ∈
+    /// [2921, 3007) 或 ≥ 3061.</summary>
+    private static bool Uses2921Layout =>
+        Build >= 22621 && ((Revision is >= 2921 and < 3007) || Revision >= 3061);
 
     // ---- COM 声明 ----
 
@@ -97,6 +110,40 @@ public static class VirtualDesktop
         void GetAt(int index, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out object obj);
     }
 
+    /// <summary>Win11 23H2 **2921 变体** (build 22621 且 revision ∈
+    /// [2921,3007) 或 ≥3061 — 含本机 22631.6199): 与基线同一 IID、同一
+    /// 槽位顺序, 但 CreateDesktop / MoveDesktop **多一个 IntPtr 参数**.
+    /// 照基线声明去调 = 传参个数不对 → 读栈上的垃圾当 HWND 用.
+    /// 只有要建桌面时才用这个声明.</summary>
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("53F5CA0B-158F-4124-900C-057158060B27")]
+    internal interface IVirtualDesktopManagerInternal2921
+    {
+        int GetCount();
+        void MoveViewToDesktop(IntPtr view, IVirtualDesktop desktop);
+        bool CanViewMoveDesktops(IntPtr view);
+        IVirtualDesktop GetCurrentDesktop();
+        void GetDesktops(out IObjectArray desktops);
+        [PreserveSig]
+        int GetAdjacentDesktop(IVirtualDesktop from, int direction, out IVirtualDesktop desktop);
+        void SwitchDesktop(IVirtualDesktop desktop);
+        IVirtualDesktop CreateDesktop(IntPtr hWndOrMon);
+        void MoveDesktop(IVirtualDesktop desktop, IntPtr hWndOrMon, int nIndex);
+        void RemoveDesktop(IVirtualDesktop desktop, IVirtualDesktop fallback);
+        IVirtualDesktop FindDesktop(ref Guid desktopid);
+        void GetDesktopSwitchIncludeExcludeViews(IVirtualDesktop desktop, out IObjectArray u1, out IObjectArray u2);
+        void SetDesktopName(IVirtualDesktop desktop, [MarshalAs(UnmanagedType.HString)] string name);
+        void SetDesktopWallpaper(IVirtualDesktop desktop, [MarshalAs(UnmanagedType.HString)] string path);
+        void UpdateWallpaperPathForAllDesktops([MarshalAs(UnmanagedType.HString)] string path);
+        void CopyDesktopState(IntPtr view0, IntPtr view1);
+        void CreateRemoteDesktop([MarshalAs(UnmanagedType.HString)] string path, out IVirtualDesktop desktop);
+        void SwitchRemoteDesktop(IVirtualDesktop desktop, IntPtr switchtype);
+        void SwitchDesktopWithAnimation(IVirtualDesktop desktop);
+        void GetLastActiveDesktop(out IVirtualDesktop desktop);
+        void WaitForAnimationToComplete();
+    }
+
     /// <summary>公开 COM (1903+): vtable 稳定, 查/移窗口所属桌面用.
     /// Phase 2 (卡上显示桌面号) 与 Phase 3 (迁窗口) 走这里.</summary>
     [ComImport]
@@ -153,6 +200,68 @@ public static class VirtualDesktop
         }
     }
 
+    /// <summary>当前桌面的 GUID (空 = 未知).</summary>
+    public static Guid CurrentGuid
+    {
+        get
+        {
+            var mgr = GetManager();
+            if (mgr is null) return Guid.Empty;
+            try
+            {
+                var cur = mgr.GetCurrentDesktop();
+                return cur is null ? Guid.Empty : cur.GetId();
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("VirtualDesktop", ex);
+                return Guid.Empty;
+            }
+        }
+    }
+
+    /// <summary>全部桌面 (序号 + GUID + 名字). 空表 = 不可用.</summary>
+    public static IReadOnlyList<DesktopInfo> List()
+    {
+        var mgr = GetManager();
+        if (mgr is null) return Array.Empty<DesktopInfo>();
+        try
+        {
+            var count = mgr.GetCount();
+            var list = new List<DesktopInfo>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var d = GetDesktop(mgr, i);
+                if (d is null) continue;
+                var id = d.GetId();
+                list.Add(new DesktopInfo(i, id, NameOf(id, i + 1)));
+            }
+            return list;
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("VirtualDesktop", ex);
+            return Array.Empty<DesktopInfo>();
+        }
+    }
+
+    /// <summary>桌面名: 注册表里的自定义名 (Windows 存这儿). 没名字 = 空串
+    /// (显示层自己补 "桌面 N"). 上游 (dankrusi / choyy) 读的都是这个键.</summary>
+    private static string NameOf(Guid id, int oneBased)
+    {
+        try
+        {
+            var key = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops\Desktops\{{{id}}}";
+            var name = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_CURRENT_USER\" + key, "Name", null)?.ToString();
+            return name?.Trim() ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
     /// <summary>切到指定桌面 (0 基). 失败 (不支持的 build / 桌面不存在 /
     /// COM 报错) 返回 false, 只写日志.</summary>
     public static bool SwitchTo(int index0)
@@ -193,6 +302,62 @@ public static class VirtualDesktop
         {
             Log.Exception("VirtualDesktop", ex);
             return Guid.Empty;
+        }
+    }
+
+    /// <summary>窗口是否在当前桌面上 (公开 COM 的 GetWindowDesktopId 比
+    /// IsWindowOnCurrentVirtualDesktop 可靠 — 上游 choyy 明确标了后者不可用).</summary>
+    public static bool IsOnCurrentDesktop(IntPtr hwnd)
+    {
+        var cur = CurrentGuid;
+        if (cur == Guid.Empty) return true; // 取不到桌面信息 → 不拦
+        var id = DesktopIdOfWindow(hwnd);
+        return id == Guid.Empty || id == cur;
+    }
+
+    /// <summary>新建一个虚拟桌面. 返回新桌面 (空 = 失败). 新桌面排在最后,
+    /// 不自动切过去.</summary>
+    public static DesktopInfo? Create()
+    {
+        var mgr = GetManager();
+        if (mgr is null) return null;
+        try
+        {
+            // 建桌面在 vtable 的第 8 槽 — 正好是 23H2_2921 变体改过签名
+            // 的地方, 所以必须按 build/revision 选声明.
+            IVirtualDesktop? desktop = Uses2921Layout
+                ? ((IVirtualDesktopManagerInternal2921)(object)mgr).CreateDesktop(IntPtr.Zero)
+                : mgr.CreateDesktop();
+            if (desktop is null) return null;
+            var id = desktop.GetId();
+            var index = GetDesktopIndex(mgr, desktop);
+            Log.Info("VirtualDesktop", $"created desktop index={index} (2921={Uses2921Layout})");
+            return new DesktopInfo(index, id, NameOf(id, index + 1));
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("VirtualDesktop", ex);
+            return null;
+        }
+    }
+
+    /// <summary>把窗口搬到指定桌面 (公开 COM, vtable 稳定). 失败返回 false.</summary>
+    public static bool MoveWindowToDesktop(IntPtr hwnd, Guid desktopId)
+    {
+        if (hwnd == IntPtr.Zero || desktopId == Guid.Empty) return false;
+        try
+        {
+            var mgr = GetPublicManager();
+            if (mgr is null) return false;
+            var id = desktopId; // ref 参数 → 需要可写副本
+            mgr.MoveWindowToDesktop(hwnd, ref id);
+            Log.Info("VirtualDesktop", $"move window 0x{hwnd.ToInt64():X} → {desktopId}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("VirtualDesktop", ex);
+            return false;
         }
     }
 
