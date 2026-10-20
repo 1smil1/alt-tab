@@ -300,6 +300,14 @@ public static class VirtualDesktop
         }
         catch (Exception ex)
         {
+            // TYPE_E_ELEMENTNOTFOUND (0x8002802B): 桌面切换动画期间查旧桌面的
+            // 窗口, 或窗口正在销毁 — 常态, 不是错误 (CLR 把它映射成
+            // ElementNotFoundException, 不是 COMException).
+            if (ex.HResult == unchecked((int)0x8002802B))
+            {
+                Log.Verbose("VirtualDesktop", $"GetWindowDesktopId(0x{hwnd.ToInt64():X}) not found");
+                return Guid.Empty;
+            }
             Log.Exception("VirtualDesktop", ex);
             return Guid.Empty;
         }

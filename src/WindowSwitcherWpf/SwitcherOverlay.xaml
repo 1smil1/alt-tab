@@ -293,6 +293,20 @@
                                                        Foreground="#FF5A5A5A"
                                                        Margin="4,1"/>
                                         </Border>
+                                        <!-- 别的虚拟桌面上的窗口: 蓝色 D号角标
+                                             (面板是全局列表, 必须标出来) -->
+                                        <Border Background="#FF0078D4"
+                                                CornerRadius="4"
+                                                Margin="0,0,5,0"
+                                                VerticalAlignment="Center"
+                                                Visibility="{Binding DesktopBadgeVisibility}"
+                                                ToolTip="在其它虚拟桌面上 — 点它会自动切过去">
+                                            <TextBlock Text="{Binding DesktopBadge}"
+                                                       FontSize="10"
+                                                       FontWeight="Bold"
+                                                       Foreground="White"
+                                                       Margin="4,1"/>
+                                        </Border>
                                         <Image Width="20" Height="20"
                                                VerticalAlignment="Center"
                                                Source="{Binding Icon}"

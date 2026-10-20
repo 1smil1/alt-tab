@@ -90,6 +90,10 @@ public sealed class WindowEnumerator
 
     public static bool IsEligible(IntPtr hwnd, bool onlyCurrentDesktop)
     {
+        // 标签是全局的 (用户明确要求: 切虚拟桌面后标签不变) — 这里不按虚拟桌面
+        // 过滤. onlyCurrentDesktop 只影响 cloaked 判定: true 时任何 cloak 都算
+        // 不可见, false 时只把 shell cloaked (DWM_CLOAKED_SHELL) 当成"在别的
+        // 桌面上", 依旧收进列表.
         // Try DWM HAS_ICONIC_BITMAP first. If it works on this
         // machine, it's the perfect signal. If it returns E_INVALIDARG
         // (some Windows builds), fall back to the structural filter

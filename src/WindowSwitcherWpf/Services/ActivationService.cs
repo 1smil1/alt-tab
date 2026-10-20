@@ -15,6 +15,56 @@ public static class ActivationService
     public static bool Activate(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return false;
+        // 标签是全局的, 面板里可能有别的虚拟桌面的窗口. Windows 不会为
+        // SetForegroundWindow 自动切桌面 — 跨桌面激活静默失败, 所以先切
+        // 到窗口所在桌面, 等切完再激活.
+        var id = WindowSwitcherWpf.Interop.VirtualDesktop.DesktopIdOfWindow(hwnd);
+        var cur = WindowSwitcherWpf.Interop.VirtualDesktop.CurrentGuid;
+        if (id != Guid.Empty && cur != Guid.Empty && id != cur)
+        {
+            var index = DesktopIndexOf(id);
+            if (index >= 0 && WindowSwitcherWpf.Interop.VirtualDesktop.SwitchTo(index))
+            {
+                WindowSwitcherWpf.Services.Log.Info("Activate",
+                    $"cross-desktop → 桌面 {index + 1}, 延迟激活 0x{hwnd.ToInt64():X}");
+                ActivateAfterDesktopSwitch(hwnd);
+                return true;
+            }
+        }
+        return ActivateNow(hwnd);
+    }
+
+    private static int DesktopIndexOf(Guid id)
+    {
+        foreach (var d in WindowSwitcherWpf.Interop.VirtualDesktop.List())
+            if (d.Id == id) return d.Index;
+        return -1;
+    }
+
+    /// <summary>桌面切换动画 (~0.3s) 期间窗口还没显示, 直接激活必失败.
+    /// 定时重试, 激活成功后闪一下边框.</summary>
+    private static void ActivateAfterDesktopSwitch(IntPtr hwnd)
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(180)
+        };
+        var tries = 0;
+        timer.Tick += (_, _) =>
+        {
+            tries++;
+            var ok = ActivateNow(hwnd);
+            if (!ok && tries < 5) return;
+            timer.Stop();
+            WindowSwitcherWpf.Services.Log.Info("Activate",
+                $"cross-desktop activate → {ok} after {tries} tries");
+        };
+        timer.Start();
+    }
+
+    private static bool ActivateNow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return false;
         try
         {
             WindowSwitcherWpf.Services.Log.Info("Activate",

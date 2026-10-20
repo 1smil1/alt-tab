@@ -131,6 +131,22 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Length > 0 && e.Args[0] == "--vd-windows")
+        {
+            // 调试用: 列出所有窗口 + 各自所属虚拟桌面 (公开 COM 查询).
+            var cur = VirtualDesktop.CurrentGuid;
+            Console.WriteLine($"current desktop = {cur}");
+            var en = new WindowEnumerator();
+            foreach (var w in en.Enumerate(onlyCurrentDesktop: false))
+            {
+                var id = VirtualDesktop.DesktopIdOfWindow(w.Hwnd);
+                var mark = id == cur ? "CUR" : "   ";
+                Console.WriteLine($"{mark} {id} {w.Title}");
+            }
+            Shutdown();
+            return;
+        }
+
         // -autostart = Task Scheduler 登录触发拉起. 桌面/explorer 还没全 ready
         // 就装 LL hook 会导致 Alt+Tab 间歇失效 (用户实测 1次系统的/1次我
         // 们的). 等 10s 让交互会话就绪. 手动启动不会带这个参数, 无延迟.

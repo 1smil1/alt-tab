@@ -129,6 +129,20 @@ public partial class SwitcherOverlay : Window
         }
     }
 
+    /// <summary>卡片角标: 窗口不在当前虚拟桌面时返回 "D2" 这样的标记,
+    /// 在当前桌面返回 "" (不显示).</summary>
+    private string DesktopBadgeOf(IntPtr hwnd)
+    {
+        var id = VirtualDesktop.DesktopIdOfWindow(hwnd);
+        if (id == Guid.Empty) return "";
+        foreach (var d in _desktops)
+        {
+            if (d.Id != id) continue;
+            return d.IsCurrent ? "" : $"D{d.Index + 1}";
+        }
+        return "";
+    }
+
     /// <summary>指针下的桌面槽位 (坐标相对 DesktopBar).</summary>
     private DesktopChip? DesktopChipAt(Point p)
     {
@@ -479,6 +493,7 @@ public partial class SwitcherOverlay : Window
     private void RebuildFromSlots(bool preserveScroll)
     {
         var offset = preserveScroll ? Scroller.VerticalOffset : 0.0;
+        RefreshDesktops(); // 桌面号角标要用当前桌面列表
         _windows.Clear();
         if (_controller.IsInStackView)
         {
@@ -492,6 +507,7 @@ public partial class SwitcherOverlay : Window
                     // not the shared slot digit; Alt+digit maps 1..9→0..8,
                     // 0→9th, matching SelectByDigit.
                     SlotBadge = RelativeMemberDigit(idx),
+                    DesktopBadge = DesktopBadgeOf(m.Hwnd),
                     // 固定子标签在子页面同样亮黄框 (alt 3 进入看到同样语义).
                     IsPinned = _controller.IsMemberPinned(m.Hwnd),
                 };
@@ -511,6 +527,7 @@ public partial class SwitcherOverlay : Window
                 var ow = new OverlayWindow(sw.Entry, sw.Entry.GroupKey, 0)
                 {
                     SlotBadge = sw.Slot >= 0 ? sw.Slot.ToString() : "",
+                    DesktopBadge = DesktopBadgeOf(sw.Entry.Hwnd),
                     SlotValue = sw.Slot,
                     // 位置号 != 快捷号时才显示成 "位置(快捷)" (未指派 = 回落
                     // 位置号 = null, 与位置号相同时也是 null).
@@ -966,10 +983,12 @@ public partial class SwitcherOverlay : Window
                     NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWNOACTIVATE);
                 System.Threading.Thread.Sleep(600);
                 // Re-minimize and uncloak EVERYTHING we touched, even if
-                // the overlay closed mid-dance.
+                // the overlay closed mid-dance. 只还原**我们真的 cloak 成功**
+                // 的那些 — 对 cloak 被拒 (提权窗口) 的窗强制写 0 会把别的
+                // 虚拟桌面上的窗口拉回当前桌面.
                 foreach (var h in restored)
                     NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWMINNOACTIVE);
-                foreach (var h in minimized)
+                foreach (var h in restored)
                 {
                     var cloak = 0;
                     NativeMethods.DwmSetWindowAttribute(
@@ -2715,6 +2734,12 @@ public sealed class OverlayWindow : System.ComponentModel.INotifyPropertyChanged
 
     /// <summary>位置编号 (Slot). -2 = 当前窗口副本, -1 = 无编号 (溢出).</summary>
     public int SlotValue { get; init; } = -2;
+
+    /// <summary>窗口所在虚拟桌面的角标 ("" = 当前桌面, 不显示). 面板是全局
+    /// 标签列表, 别的桌面的窗口必须标出来, 否则点不动也不知道为什么.</summary>
+    public string DesktopBadge { get; init; } = "";
+    public System.Windows.Visibility DesktopBadgeVisibility =>
+        string.IsNullOrEmpty(DesktopBadge) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
 
     /// <summary>单独指派的一次直达号码; null = 没指派或就等于位置号
     /// (= 旧行为, 不显示额外信息).</summary>
