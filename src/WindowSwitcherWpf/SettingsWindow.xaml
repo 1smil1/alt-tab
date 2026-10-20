@@ -72,6 +72,19 @@
                             <ComboBoxItem Content="从不拦截"/>
                         </ComboBox>
                     </Grid>
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="虚拟桌面热键" Foreground="#FFE0E0E0"
+                                   VerticalAlignment="Center"/>
+                        <TextBox x:Name="VdHotkeyBox" Grid.Column="1"
+                                 TextChanged="OnVdHotkeyChanged"/>
+                    </Grid>
+                    <TextBlock Text='只有修饰键的前缀, 后面跟数字切 Windows 虚拟桌面: "Alt+Ctrl"+1 → 桌面1, +2 → 桌面2 (0 = 桌面10). 空 = 关闭.'
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
                     <CheckBox x:Name="AutoStartBox" Content="开机自启动"
                               Foreground="#FFE0E0E0" Margin="0,12,0,0"
                               VerticalAlignment="Center"/>

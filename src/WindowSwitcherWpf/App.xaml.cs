@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Interop;
@@ -107,6 +108,13 @@ public partial class App : Application
         if (e.Args.Length > 0 && e.Args[0] == "--test-stack")
         {
             RunStackTests();
+            Shutdown();
+            return;
+        }
+
+        if (e.Args.Length > 0 && e.Args[0] == "--test-vd")
+        {
+            RunVirtualDesktopTests();
             Shutdown();
             return;
         }
@@ -228,6 +236,7 @@ public partial class App : Application
         _keyboard.EscapePressed += () => _overlay?.Cancel();
         _keyboard.QuickJumpDown += OnQuickJumpDown;
         _keyboard.QuickJumpUp += OnQuickJumpUp;
+        _keyboard.VirtualDesktopSwitch += OnVirtualDesktopSwitch;
         _keyboard.Install();
 
         // Click-outside (overlay 矩形外的鼠标按键 → cancel): 需要全局 LL
@@ -387,6 +396,20 @@ public partial class App : Application
         }
         hook.QuickModifierVirtualKeys = HotkeyParser.ModifierKeys(
             _controller.Config.QuickJumpModifier);
+        // 虚拟桌面热键: 前缀 (只修饰键) + 数字 → 切第 N 个虚拟桌面.
+        // 解析失败/留空 = 关闭该功能 (空数组).
+        var vdPrefix = _controller.Config.VirtualDesktopHotkey;
+        if (HotkeyParser.TryParseModifiers(vdPrefix, out var vdMods))
+        {
+            hook.VirtualDesktopModifierVks = vdMods;
+            Log.Info("App", $"virtual desktop hotkey '{vdPrefix}' → " +
+                $"vks=[{string.Join(',', vdMods.Select(v => $"0x{v:X2}"))}]");
+        }
+        else
+        {
+            hook.VirtualDesktopModifierVks = Array.Empty<uint>();
+            Log.Info("App", $"virtual desktop hotkey '{vdPrefix ?? "<null>"}' — disabled");
+        }
         // 切到窗口后的外框蓝光 (设置保存时同样热生效)
         WindowFlash.Enabled = _controller.Config.SelectionGlow ?? true;
         hook.SuppressAltTabActive = _controller.Config.SuppressAltTab
@@ -398,6 +421,15 @@ public partial class App : Application
     private System.Windows.Threading.DispatcherTimer? _quickHoldTimer;
     private IntPtr _quickTargetHwnd;
     private bool _quickOpenedStack;
+
+    /// <summary>虚拟桌面热键 (前缀 + 数字): 切到第 N 个虚拟桌面.
+    /// 数字 0 = 第 10 个桌面 (与面板内编号习惯一致). 桌面不存在 → 只记日志.</summary>
+    private void OnVirtualDesktopSwitch(int digit)
+    {
+        var number = digit == 0 ? 10 : digit;
+        var ok = VirtualDesktop.SwitchTo(number - 1);
+        Log.Info("App", $"virtual desktop {digit} → 桌面{number} ok={ok}");
+    }
 
     /// <summary>一次直达按下: 记住目标; 若目标是堆叠头, 启动 300ms 按住
     /// 计时 — 到点弹子标签页面 (像长按 Alt+数字进入堆叠内部).</summary>
@@ -1198,6 +1230,18 @@ public partial class App : Application
             HotkeyParser.ModifierKeys("Ctrl")[0] == 0x11
             && HotkeyParser.ModifierKeys(null)[0] == 0x12);
 
+        // 虚拟桌面热键前缀 (只修饰键): "Alt+Ctrl" → Alt 组 + Ctrl 组.
+        Check("vd-mods-altctrl",
+            HotkeyParser.TryParseModifiers("Alt+Ctrl", out var m1)
+            && m1.Contains(0x12u) && m1.Contains(0x11u) && m1.Length == 6,
+            $"vks=[{string.Join(',', m1)}]");
+        Check("vd-mods-single",
+            HotkeyParser.TryParseModifiers("Ctrl", out var m2) && m2.Length == 3);
+        Check("vd-mods-empty-invalid",
+            !HotkeyParser.TryParseModifiers("", out _)
+            && !HotkeyParser.TryParseModifiers(null, out _)
+            && !HotkeyParser.TryParseModifiers("Alt+Nope", out _));
+
         // 缩小化开关解析: pinned null = 跟随 flow, flow null = 否.
         var R = SwitcherController.ResolveMinimize;
         Check("minimize-default-off", !R(null, null, false) && !R(null, null, true));
@@ -1212,8 +1256,35 @@ public partial class App : Application
         Environment.Exit(0);
     }
 
-    private void RunEnumerate()
+    /// <summary>
+    /// 虚拟桌面自检 (只读, **不切桌面**): 打印桌面数量 / 当前序号,
+    /// 断言至少能读到 1 个桌面. 跑: <c>--test-vd</c>.
+    /// </summary>
+    private void RunVirtualDesktopTests()
     {
+        static void Check(string name, bool ok, string detail = "")
+        {
+            var line = $"{(ok ? "PASS" : "FAIL")} {name}{(detail.Length > 0 ? " | " + detail : "")}";
+            Console.WriteLine(line);
+            WindowSwitcherWpf.Services.Log.Info("VdTests", line);
+        }
+
+        var count = VirtualDesktop.Count;
+        var current = VirtualDesktop.CurrentIndex;
+        Console.WriteLine($"desktops={count} current={current + 1}");
+        Check("vd-count", count >= 1, $"count={count}");
+        Check("vd-current-in-range", count == 0 || (current >= 0 && current < count),
+            $"current={current} count={count}");
+        // 切到**当前**桌面: 视觉上无变化, 但能证明 vtable 槽位对
+        // (槽位错 = 非托管崩溃, catch 不住).
+        if (count >= 1 && current >= 0)
+            Check("vd-switch-to-current", VirtualDesktop.SwitchTo(current));
+
+        WindowSwitcherWpf.Services.Log.Info("VdTests", "done");
+        Environment.Exit(0);
+    }
+
+    private void RunEnumerate()    {
         var enumerator = new WindowEnumerator();
         var list = enumerator.Enumerate(onlyCurrentDesktop: true);
         Console.WriteLine($"=== final count = {list.Count} ===");

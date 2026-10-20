@@ -38,6 +38,9 @@ public sealed class KeyboardHook : IDisposable
     public event Action<int>? QuickJumpDown;
     /// <summary>The quick-jump digit released (快速松开 = 跳转).</summary>
     public event Action<int>? QuickJumpUp;
+    /// <summary>虚拟桌面热键 (修饰键前缀 + 数字, overlay 关着时): 切到第
+    /// N 个 Windows 虚拟桌面 (0 = 第 10 个).</summary>
+    public event Action<int>? VirtualDesktopSwitch;
 
     /// <summary>Alt+Tab 拦截开关 (config SuppressAltTab 解析后的最终值):
     /// 开 = Alt+Tab 永远到不了系统 (被我们的 overlay 取代).</summary>
@@ -46,6 +49,11 @@ public sealed class KeyboardHook : IDisposable
     /// <summary>一次直达修饰键的 virtual keys (默认 Alt 三键). Set from
     /// config QuickJumpModifier via HotkeyParser.ModifierKeys.</summary>
     public uint[] QuickModifierVirtualKeys { get; set; } = { 0x12, 0xA4, 0xA5 };
+
+    /// <summary>虚拟桌面热键的修饰键前缀 (config VirtualDesktopHotkey 解析
+    /// 结果, 如 Alt+Ctrl → Alt+Ctrl 六个 vk). 空 = 该功能关闭.
+    /// 按住**全部**这些键再按数字 = 切虚拟桌面.</summary>
+    public uint[] VirtualDesktopModifierVks { get; set; } = Array.Empty<uint>();
 
     public uint TriggerVirtualKey { get; set; } = 0xC0; // VK_OEM_3 = backtick
     public uint TriggerScanCode { get; set; } = 0x29;
@@ -329,10 +337,25 @@ public sealed class KeyboardHook : IDisposable
             }
         }
 
+        // 虚拟桌面 (overlay closed): 修饰键前缀 + 数字 → 切第 N 个虚拟桌面.
+        // 必须排在"一次直达"前面: 默认 quick 修饰键就是 Alt, Alt+Ctrl+1
+        // 会同时满足一次直达的条件, 不先拦掉就会两个都触发.
+        if (!_overlayOpen && !isUp
+            && VirtualDesktopModifierVks.Length > 0
+            && vk is >= 0x30 and <= 0x39 or >= 0x60 and <= 0x69
+            && VirtualDesktopModsHeld())
+        {
+            var digit = DigitFromVk(vk);
+            Log.Info("KeyboardHook", $"virtual desktop switch {digit}");
+            Fire(() => VirtualDesktopSwitch?.Invoke(digit));
+            return new IntPtr(1);
+        }
+
         // 一次直达 (overlay closed): quick+数字. 整个组合被吞掉 — 不让
         // 焦点应用收到 Alt+1 (浏览器切 tab 之类). 按住等 QuickJumpUp,
         // App 层区分 快速松开=跳转 / 按住堆叠≥300ms=子标签页面.
         if (!_overlayOpen && _quickModDown && !isUp && _quickDigitVk == 0
+            && !VirtualDesktopModsHeld()
             && vk is >= 0x30 and <= 0x39 or >= 0x60 and <= 0x69)
         {
             var digit = DigitFromVk(vk);
@@ -346,6 +369,51 @@ public sealed class KeyboardHook : IDisposable
 
     private static int DigitFromVk(uint vk) =>
         vk >= 0x60 ? (int)(vk - 0x60) : (int)(vk - 0x30);
+
+    // 修饰键组位掩码 (Alt=1, Ctrl=2, Shift=4, Win=8).
+    private const int ModAlt = 1, ModCtrl = 2, ModShift = 4, ModWin = 8;
+
+    private static int ModMask(uint[] vks)
+    {
+        var mask = 0;
+        foreach (var k in vks)
+            mask |= k switch
+            {
+                0x12 or 0xA4 or 0xA5 => ModAlt,
+                0x11 or 0xA2 or 0xA3 => ModCtrl,
+                0x10 or 0xA0 or 0xA1 => ModShift,
+                0x5B or 0x5C => ModWin,
+                _ => 0,
+            };
+        return mask;
+    }
+
+    /// <summary>虚拟桌面热键此刻是否"完整按住". 两个条件:
+    /// 1) 前缀里的修饰键组全都按着;
+    /// 2) 前缀必须比"一次直达"的修饰键**更具体** (严格超集) — 否则
+    /// Alt+1 这种组合会同时命中两者 (用户把前缀也设成 Alt 时就撞了).</summary>
+    private bool VirtualDesktopModsHeld()
+    {
+        var vd = ModMask(VirtualDesktopModifierVks);
+        if (vd == 0) return false;
+        if ((vd & ~ModMask(QuickModifierVirtualKeys)) == 0) return false;
+        if ((vd & ModAlt) != 0
+            && (GetAsyncKeyState(0x12) & 0x8000) == 0
+            && (GetAsyncKeyState(0xA4) & 0x8000) == 0
+            && (GetAsyncKeyState(0xA5) & 0x8000) == 0) return false;
+        if ((vd & ModCtrl) != 0
+            && (GetAsyncKeyState(0x11) & 0x8000) == 0
+            && (GetAsyncKeyState(0xA2) & 0x8000) == 0
+            && (GetAsyncKeyState(0xA3) & 0x8000) == 0) return false;
+        if ((vd & ModShift) != 0
+            && (GetAsyncKeyState(0x10) & 0x8000) == 0
+            && (GetAsyncKeyState(0xA0) & 0x8000) == 0
+            && (GetAsyncKeyState(0xA1) & 0x8000) == 0) return false;
+        if ((vd & ModWin) != 0
+            && (GetAsyncKeyState(0x5B) & 0x8000) == 0
+            && (GetAsyncKeyState(0x5C) & 0x8000) == 0) return false;
+        return true;
+    }
 
     // ---------- 专用泵线程的 message loop P/Invoke (self-contained) ----------
 

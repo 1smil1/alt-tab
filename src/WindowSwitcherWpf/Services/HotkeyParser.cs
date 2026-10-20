@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace WindowSwitcherWpf.Services;
 
@@ -55,6 +56,33 @@ public static class HotkeyParser
         "win" or "windows" or "meta" => new uint[] { 0x5B, 0x5C }, // L/R win
         _ => new uint[] { 0x12, 0xA4, 0xA5 },                     // VK_MENU Alt, L/R
     };
+
+    /// <summary>解析**只有修饰键**的前缀串 ("Alt+Ctrl" / "Ctrl" / "Win+Shift").
+    /// 返回该前缀要求按住的所有虚拟键 (左/右/共享都算). 空串 / 未知段 →
+    /// false (功能关闭). 与 <see cref="TryParseKey"/> 的区别: 那个只取最后
+    /// 一段 (主键), 这里要的是修饰键集合 — 虚拟桌面热键是"前缀+数字".</summary>
+    public static bool TryParseModifiers(string? prefix, out uint[] mods)
+    {
+        mods = Array.Empty<uint>();
+        if (string.IsNullOrWhiteSpace(prefix)) return false;
+        var list = new List<uint>();
+        foreach (var seg in prefix.Split('+', StringSplitOptions.TrimEntries))
+        {
+            uint[] keys;
+            switch (seg.ToLowerInvariant())
+            {
+                case "alt" or "menu": keys = new uint[] { 0x12, 0xA4, 0xA5 }; break;
+                case "ctrl" or "control": keys = new uint[] { 0x11, 0xA2, 0xA3 }; break;
+                case "shift": keys = new uint[] { 0x10, 0xA0, 0xA1 }; break;
+                case "win" or "windows" or "meta": keys = new uint[] { 0x5B, 0x5C }; break;
+                default: return false; // 未知修饰键 → 整个前缀无效
+            }
+            foreach (var k in keys) if (!list.Contains(k)) list.Add(k);
+        }
+        if (list.Count == 0) return false;
+        mods = list.ToArray();
+        return true;
+    }
 
     private static bool TryKeyToVk(string key, out uint vk)
     {

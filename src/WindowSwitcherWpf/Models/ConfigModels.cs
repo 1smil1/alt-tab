@@ -54,6 +54,12 @@ public sealed class ConfigFile
     /// <summary>切到窗口后, 在那个窗口外框闪一圈蓝光然后马上消失 (最小化
     /// 的窗口恢复上来那一刻也能看见). null = 默认 true.</summary>
     public bool? SelectionGlow { get; set; }
+
+    /// <summary>虚拟桌面热键的**修饰键前缀** ("Alt+Ctrl" / "Ctrl+Alt" /
+    /// "Win+Ctrl"), 后面跟数字 = 切到第 N 个虚拟桌面 (0 = 第 10 个).
+    /// null/空 = 关闭该功能. 注意与 <see cref="QuickJumpModifier"/> 的区别:
+    /// 那个是"一次直达窗口"的修饰键, 这个是"切虚拟桌面"的.</summary>
+    public string? VirtualDesktopHotkey { get; set; }
 }
 
 /// <summary>手动堆叠 (自定义集中): an ordered set of windows collapsed into

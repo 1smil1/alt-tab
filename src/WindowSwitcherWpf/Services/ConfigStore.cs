@@ -78,6 +78,7 @@ public sealed class ConfigStore
             cfg.Hotkey ??= dft.Hotkey;
             cfg.SecondHotkey ??= dft.SecondHotkey;
             cfg.QuickJumpModifier ??= dft.QuickJumpModifier;
+            cfg.VirtualDesktopHotkey ??= dft.VirtualDesktopHotkey;
             cfg.AutoStart ??= dft.AutoStart;
             Log.Info("Config", "loaded config.json");
             return cfg;
@@ -109,6 +110,7 @@ public sealed class ConfigStore
         Hotkey = "Alt+Tab",
         SecondHotkey = "Alt+`",
         QuickJumpModifier = "Alt",
+        VirtualDesktopHotkey = "Alt+Ctrl",
         SuppressAltTab = null,
         AutoStart = true,
     };
