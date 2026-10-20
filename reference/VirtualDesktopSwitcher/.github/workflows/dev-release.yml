@@ -1,0 +1,40 @@
+name: Dev Build & Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Build
+        run: xmake build -y
+
+      - name: Rename executable
+        shell: pwsh
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $date = Get-Date -Format "yyyyMMdd"
+          Move-Item build\windows\x86\release\VirtualDesktopSwitcher.exe "VirtualDesktopSwitcher-dev+${date}-${shortSha}.exe"
+
+      - name: Upload to Latest Release
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = gh release list --limit 1 --json tagName --jq '.[0].tagName'
+          gh release view "$tag" --json assets --jq '.assets[].name' | Select-String "VirtualDesktopSwitcher-dev" | ForEach-Object {
+            gh release delete-asset "$tag" $_ --yes
+          }
+          gh release upload "$tag" VirtualDesktopSwitcher-*.exe --clobber

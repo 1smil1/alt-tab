@@ -1,0 +1,71 @@
+name: Publish to WinGet
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. 1.3.2)'
+        required: true
+        default: '1.3.2'
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Resolve tag and download URL
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.payload.inputs?.tag || context.payload.release?.tag_name;
+            if (!tag) { core.setFailed('No tag provided'); return; }
+            core.setOutput('version', tag);
+
+            const { data } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag
+            });
+            const exe = data.assets.find(a => a.name === 'VirtualDesktopSwitcher.exe');
+            if (!exe) { core.setFailed('No exe asset found'); return; }
+            core.setOutput('url', exe.browser_download_url);
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Sync winget-pkgs fork
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $headers = @{ Authorization = "token $env:WINGET_TOKEN"; "User-Agent" = "VirtualDesktopSwitcher-winget-sync" }
+          $me = (Invoke-RestMethod -Uri "https://api.github.com/user" -Headers $headers).login
+          $fork = Invoke-RestMethod -Uri "https://api.github.com/repos/$me/winget-pkgs" -Headers $headers
+          $branch = $fork.default_branch
+          # Invoke-RestMethod 会解码 %2F 导致 PATCH 404，改用 curl 保留编码
+          $upstream = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/git/refs/heads%2F$branch" -Headers $headers
+          $sha = $upstream.object.sha
+          $body = @{ sha = $sha; force = $true } | ConvertTo-Json -Compress
+          curl.exe -sS -X PATCH `
+            -H "Authorization: token $env:WINGET_TOKEN" `
+            -H "Accept: application/vnd.github+json" `
+            -H "Content-Type: application/json" `
+            -d $body `
+            "https://api.github.com/repos/$me/winget-pkgs/git/refs/heads%2F$branch"
+          Write-Host "fork synced to $branch @ $($sha.Substring(0,7))"
+
+      - name: Submit winget PR
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe update Chooyy.VirtualDesktopSwitcher `
+            -u "$env:INSTALLER_URL|neutral" `
+            -v "$env:PKG_VERSION" `
+            -t "${{ secrets.WINGET_TOKEN }}" `
+            --submit
+        env:
+          INSTALLER_URL: ${{ steps.release.outputs.url }}
+          PKG_VERSION: ${{ steps.release.outputs.version }}

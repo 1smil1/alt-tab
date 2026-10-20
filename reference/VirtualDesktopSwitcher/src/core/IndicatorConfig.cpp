@@ -1,0 +1,60 @@
+#include "IndicatorConfig.h"
+
+#include "util/ConfigIni.h"
+
+void IndicatorConfig::LoadFromIni() {
+    std::wstring color = ReadIniString(L"Display", L"TextColor", L"#FFA745_#FE869F_#EF7AC8_#A083ED_#43AEFF");
+    if (!color.empty()) { textColor = color; }
+
+    windowRatio.x = ReadIniFloat(L"Display", L"WindowRatioX", windowRatio.x);
+    windowRatio.y = ReadIniFloat(L"Display", L"WindowRatioY", windowRatio.y);
+
+    int fs = ReadIniInt(L"Display", L"FontSize", 20);
+    if (fs > 0) { fontSize = fs; }
+
+    currentSymbol = ReadIniSymbol(L"Display", L"CurrentSymbol", currentSymbol);
+    otherSymbol   = ReadIniSymbol(L"Display", L"OtherSymbol", otherSymbol);
+    emptySymbol   = ReadIniSymbol(L"Display", L"EmptySymbol", emptySymbol);
+
+    int sp = ReadIniInt(L"Display", L"CharSpacing", 0);
+    if (sp >= 0) { charSpacing = sp; }
+
+    std::wstring fn = ReadIniString(L"Display", L"FontName", L"Segoe UI Symbol");
+    if (!fn.empty()) { fontName = fn; }
+
+    int presetVal  = ReadIniInt(L"Display", L"PositionPreset", static_cast<int>(PositionPreset::TopCenter));
+    positionPreset = (presetVal >= 0 && presetVal < static_cast<int>(PositionPreset::Count))
+                         ? static_cast<PositionPreset>(presetVal)
+                         : PositionPreset::Custom;
+    showMode       = static_cast<ShowMode>(ReadIniInt(L"Display", L"ShowMode", 0));
+    animMode       = ReadIniInt(L"Display", L"AnimMode", 1);
+    autoContrast   = ReadIniInt(L"Display", L"AutoContrast", 1) != 0;
+    autoFocus      = ReadIniInt(L"Display", L"AutoFocus", 1) != 0;
+    int modeVal    = ReadIniInt(L"Display", L"DisplayMode", -1);
+    if (modeVal >= 0 && modeVal < static_cast<int>(IndicatorDisplayMode::Count)) {
+        displayMode = static_cast<IndicatorDisplayMode>(modeVal);
+    }
+    int dragVal    = ReadIniInt(L"Display", L"DragSwitchMode", 0);
+    dragSwitchMode = (dragVal >= 0 && dragVal < static_cast<int>(DragSwitchMode::Count))
+                         ? static_cast<DragSwitchMode>(dragVal)
+                         : DragSwitchMode::Always;
+}
+
+void IndicatorConfig::SaveToIni() const {
+    WriteIniString(L"Display", L"TextColor", textColor);
+    WriteIniFloat(L"Display", L"WindowRatioX", windowRatio.x);
+    WriteIniFloat(L"Display", L"WindowRatioY", windowRatio.y);
+    WriteIniInt(L"Display", L"FontSize", fontSize);
+    WriteIniString(L"Display", L"CurrentSymbol", EncodeSymbol(currentSymbol));
+    WriteIniString(L"Display", L"OtherSymbol", EncodeSymbol(otherSymbol));
+    WriteIniString(L"Display", L"EmptySymbol", EncodeSymbol(emptySymbol));
+    WriteIniInt(L"Display", L"CharSpacing", charSpacing);
+    WriteIniString(L"Display", L"FontName", fontName);
+    WriteIniInt(L"Display", L"PositionPreset", static_cast<int>(positionPreset));
+    WriteIniInt(L"Display", L"ShowMode", static_cast<int>(showMode));
+    WriteIniInt(L"Display", L"AnimMode", animMode);
+    WriteIniInt(L"Display", L"AutoContrast", autoContrast ? 1 : 0);
+    WriteIniInt(L"Display", L"AutoFocus", autoFocus ? 1 : 0);
+    WriteIniInt(L"Display", L"DisplayMode", static_cast<int>(displayMode));
+    WriteIniInt(L"Display", L"DragSwitchMode", static_cast<int>(dragSwitchMode));
+}
