@@ -1439,10 +1439,10 @@ public sealed class SwitcherController
     {
         try
         {
-            // 全局标签: 面板列出所有虚拟桌面的窗口 (onlyCurrentDesktop: false
-            // → shell cloaked 的窗口也算数). 点到别的桌面的窗口时由
-            // ActivationService 先切桌面再激活.
-            var live = _enumerator.Enumerate(onlyCurrentDesktop: false);
+            // 标签范围: 默认按虚拟桌面分开 (只列当前桌面的窗口, 与原生
+            // Alt+Tab / 主流工具一致); 设置里开了"全局"才列出所有桌面.
+            var live = _enumerator.Enumerate(
+                onlyCurrentDesktop: !_config.GlobalTagsAcrossDesktops);
             _liveOrder = live.ToList();
             var grouped = _grouping.Group(live, _order);
             Groups = grouped;

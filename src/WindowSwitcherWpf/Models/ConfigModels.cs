@@ -60,6 +60,11 @@ public sealed class ConfigFile
     /// null/空 = 关闭该功能. 注意与 <see cref="QuickJumpModifier"/> 的区别:
     /// 那个是"一次直达窗口"的修饰键, 这个是"切虚拟桌面"的.</summary>
     public string? VirtualDesktopHotkey { get; set; }
+
+    /// <summary>面板标签是否**跨虚拟桌面共用一份**. false (默认, 与 Windows
+    /// 原生 Alt+Tab 和主流工具一致) = 每个虚拟桌面只显示自己的窗口;
+    /// true = 全局一份, 别的桌面的窗口也列出来 (卡片带 D号 角标).</summary>
+    public bool GlobalTagsAcrossDesktops { get; set; }
 }
 
 /// <summary>手动堆叠 (自定义集中): an ordered set of windows collapsed into

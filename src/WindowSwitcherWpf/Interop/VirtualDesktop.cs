@@ -349,6 +349,46 @@ public static class VirtualDesktop
         }
     }
 
+    /// <summary>删除一个虚拟桌面 (内部 COM RemoveDesktop). 不能删最后一个 —
+    /// Windows 自己也不允许. 删除会**关闭**该桌面上的窗口, 所以调用方要先
+    /// 跟用户确认. fallback = 删完之后切过去的面 (左边那个; 删最左就退到
+    /// 第二个).</summary>
+    public static bool Remove(Guid desktopId)
+    {
+        if (desktopId == Guid.Empty) return false;
+        var list = List();
+        if (list.Count <= 1)
+        {
+            Log.Warn("VirtualDesktop", "只剩一个桌面, 不能删");
+            return false;
+        }
+        var index = -1;
+        for (var i = 0; i < list.Count; i++)
+            if (list[i].Id == desktopId) { index = i; break; }
+        if (index < 0)
+        {
+            Log.Warn("VirtualDesktop", $"桌面 {desktopId} 不在列表里");
+            return false;
+        }
+        var mgr = GetManager();
+        if (mgr is null) return false;
+        try
+        {
+            var desktop = GetDesktop(mgr, index);
+            if (desktop is null) return false;
+            var fallback = GetDesktop(mgr, index == 0 ? 1 : index - 1);
+            if (fallback is null) return false;
+            mgr.RemoveDesktop(desktop, fallback);
+            Log.Info("VirtualDesktop", $"removed 桌面 {index + 1} ({desktopId})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("VirtualDesktop", ex);
+            return false;
+        }
+    }
+
     /// <summary>把窗口搬到指定桌面 (公开 COM, vtable 稳定). 失败返回 false.</summary>
     public static bool MoveWindowToDesktop(IntPtr hwnd, Guid desktopId)
     {

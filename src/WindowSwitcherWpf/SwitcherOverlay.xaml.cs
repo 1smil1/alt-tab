@@ -105,9 +105,30 @@ public partial class SwitcherOverlay : Window
                 string.IsNullOrWhiteSpace(d.Name)
                     ? $"桌面 {d.Index + 1}"
                     : $"{d.Index + 1} {d.Name}",
-                d.Id == current));
+                d.Id == current, list.Count >= 2));
         }
         DesktopBarRow.Visibility = list.Count >= 1 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>删掉这个虚拟桌面. 删当前桌面 = 面板自己所在的桌面没了,
+    /// 先把面板收掉再删, 否则它变成看不见的幽灵窗口.</summary>
+    private void OnDesktopChipDelete(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true; // 别再冒泡成"点 chip = 切桌面"
+        if (sender is not FrameworkElement fe || fe.DataContext is not DesktopChip chip) return;
+        if (!chip.CanDelete) return;
+        var answer = System.Windows.MessageBox.Show(
+            $"删除虚拟桌面「{chip.Label}」? 它里面的窗口会被关闭.",
+            "删除虚拟桌面",
+            System.Windows.MessageBoxButton.OKCancel,
+            System.Windows.MessageBoxImage.Warning);
+        if (answer != System.Windows.MessageBoxResult.OK) return;
+        var wasCurrent = chip.IsCurrent;
+        if (wasCurrent) Cancel();
+        var ok = VirtualDesktop.Remove(chip.Id);
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"desktop delete {chip.Label} current={wasCurrent} ok={ok}");
+        if (ok && !wasCurrent) RefreshDesktops();
     }
 
     private void OnNewDesktopClick(object sender, MouseButtonEventArgs e)
@@ -551,6 +572,9 @@ public partial class SwitcherOverlay : Window
         }
         WindowSwitcherWpf.Services.Log.Info("Overlay",
             $"rebuild windows={_windows.Count} stackView={_controller.IsInStackView}");
+        // 0 张卡 = 当前虚拟桌面是空的 (或窗口都在别的桌面). 面板必须有内容,
+        // 否则塌成 0 高度 → 看不见也点不到桌面槽位, 就切不回去了.
+        EmptyDesktopHint.Visibility = _windows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         AssignGroupAccents();
         // Thumbnail capture happens via _thumbTimer, NEVER in Rebuild,
         // otherwise 113 PrintWindow calls block the dispatcher for ~2s
@@ -735,6 +759,15 @@ public partial class SwitcherOverlay : Window
         foreach (var w in _windows)
             if (w.GroupKey == groupKey) w.IsGroupHighlighted = on;
     }
+
+    /// <summary>面板开着时选中卡的窗口 (Win+Ctrl+Shift+←/→ 迁移用).
+    /// 面板没开 → 0, 调用方回退到前台窗口.</summary>
+    public IntPtr SelectedHwnd =>
+        IsVisible && _windows.Count > 0
+            && _controller.ActiveFlatIndex >= 0
+            && _controller.ActiveFlatIndex < _windows.Count
+            ? _windows[_controller.ActiveFlatIndex].Hwnd
+            : IntPtr.Zero;
 
     private void RebuildSelection()
     {
@@ -2937,13 +2970,19 @@ public sealed class DesktopChip : System.ComponentModel.INotifyPropertyChanged
 {
     private bool _isCurrent;
 
-    public DesktopChip(int index, Guid id, string label, bool isCurrent)
+    public DesktopChip(int index, Guid id, string label, bool isCurrent, bool canDelete)
     {
         Index = index;
         Id = id;
         Label = label;
+        CanDelete = canDelete;
         _isCurrent = isCurrent;
     }
+
+    /// <summary>只剩一个桌面时不能删 — ✕ 隐藏.</summary>
+    public bool CanDelete { get; }
+    public System.Windows.Visibility DeleteVisibility =>
+        CanDelete ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
 
     /// <summary>0 基序号 (与 VirtualDesktop.DesktopInfo.Index 一致).</summary>
     public int Index { get; }

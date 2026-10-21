@@ -85,6 +85,21 @@
                     <TextBlock Text='只有修饰键的前缀, 后面跟数字切 Windows 虚拟桌面: "Alt+Ctrl"+1 → 桌面1, +2 → 桌面2 (0 = 桌面10). 空 = 关闭.'
                                FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
                                TextWrapping="Wrap"/>
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="标签范围" Foreground="#FFE0E0E0"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="TagScopeBox" Grid.Column="1" SelectedIndex="0">
+                            <ComboBoxItem Content="按虚拟桌面分开（只显示当前桌面的窗口）"/>
+                            <ComboBoxItem Content="全局共用一份（显示所有桌面的窗口）"/>
+                        </ComboBox>
+                    </Grid>
+                    <TextBlock Text="分开 = 桌面2 上看不到桌面1 的窗口, 跟 Windows 原生 Alt+Tab 一样. 全局 = 任何桌面都能看到全部标签, 别的桌面的卡片带 D号 角标, 点它会自动切过去."
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
                     <CheckBox x:Name="AutoStartBox" Content="开机自启动"
                               Foreground="#FFE0E0E0" Margin="0,12,0,0"
                               VerticalAlignment="Center"/>

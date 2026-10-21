@@ -21,6 +21,9 @@ public sealed class WindowEnumerator
 
     public IReadOnlyList<WindowEntry> Enumerate(bool onlyCurrentDesktop = true)
     {
+        // 按虚拟桌面过滤用的当前桌面 GUID — 每次枚举取一次 (COM 调用不能
+        // 按窗口做). 空 = 取不到 → 不过滤.
+        _currentDesktop = onlyCurrentDesktop ? VirtualDesktop.CurrentGuid : Guid.Empty;
         var hwnds = new List<IntPtr>();
         EnumWindows((h, _) => { hwnds.Add(h); return true; }, IntPtr.Zero);
         WindowSwitcherWpf.Services.Log.Verbose("Enumerator", $"raw HWNDs={hwnds.Count}");
@@ -88,8 +91,22 @@ public sealed class WindowEnumerator
         return result;
     }
 
+    /// <summary>当前桌面 GUID (每次 Enumerate 刷新一次). 空 = 不过滤.</summary>
+    private static Guid _currentDesktop;
+
+    /// <summary>窗口是否在当前虚拟桌面上 (公开 COM GetWindowDesktopId).
+    /// 不用 DWM_CLOAKED 判 — 实测用内部 API 切桌面后 shell 不 cloak 旧桌面
+    /// 的窗口, 靠 cloak 会把整桌窗口漏进面板.</summary>
+    private static bool OnCurrentDesktop(IntPtr hwnd)
+    {
+        if (_currentDesktop == Guid.Empty) return true;
+        var id = VirtualDesktop.DesktopIdOfWindow(hwnd);
+        return id == Guid.Empty || id == _currentDesktop;
+    }
+
     public static bool IsEligible(IntPtr hwnd, bool onlyCurrentDesktop)
     {
+        if (onlyCurrentDesktop && !OnCurrentDesktop(hwnd)) return false;
         // 标签是全局的 (用户明确要求: 切虚拟桌面后标签不变) — 这里不按虚拟桌面
         // 过滤. onlyCurrentDesktop 只影响 cloaked 判定: true 时任何 cloak 都算
         // 不可见, false 时只把 shell cloaked (DWM_CLOAKED_SHELL) 当成"在别的

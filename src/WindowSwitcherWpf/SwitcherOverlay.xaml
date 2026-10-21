@@ -124,21 +124,43 @@
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
-                            <TextBlock x:Name="DesktopChipText"
-                                       Text="{Binding Label}"
-                                       FontSize="12">
-                                <TextBlock.Style>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Foreground" Value="#FF202020"/>
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsCurrent}" Value="True">
-                                                <Setter Property="Foreground" Value="White"/>
-                                                <Setter Property="FontWeight" Value="Bold"/>
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </TextBlock.Style>
-                            </TextBlock>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="DesktopChipText"
+                                           Text="{Binding Label}"
+                                           FontSize="12">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="#FF202020"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                    <Setter Property="FontWeight" Value="Bold"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                                <!-- 删除这个虚拟桌面 (只剩一个时隐藏) -->
+                                <TextBlock x:Name="DesktopChipClose"
+                                           Text="✕"
+                                           FontSize="10"
+                                           Margin="7,1,0,0"
+                                           VerticalAlignment="Center"
+                                           ToolTip="删除这个虚拟桌面 (会关掉里面的窗口)"
+                                           Visibility="{Binding DeleteVisibility}"
+                                           MouseLeftButtonUp="OnDesktopChipDelete">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="#FF707070"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                                    <Setter Property="Foreground" Value="#D0FFFFFF"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </StackPanel>
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
@@ -157,6 +179,14 @@
                                Foreground="#FF404040"/>
                 </Border>
             </StackPanel>
+
+            <TextBlock x:Name="EmptyDesktopHint"
+                       Grid.Row="2"
+                       Text="这个虚拟桌面上没有窗口 — 点上面的桌面槽位切过去"
+                       Foreground="#FF707070"
+                       FontSize="13"
+                       Margin="10,14,0,0"
+                       Visibility="Collapsed"/>
 
             <ScrollViewer x:Name="Scroller"
                           Grid.Row="2"

@@ -34,6 +34,7 @@ public partial class SettingsWindow : Window
             _ => 0,
         };
         VdHotkeyBox.Text = cfg.VirtualDesktopHotkey ?? "";
+        TagScopeBox.SelectedIndex = cfg.GlobalTagsAcrossDesktops ? 1 : 0;
         SuppressBox.SelectedIndex = cfg.SuppressAltTab switch
         {
             null => 0,
@@ -116,6 +117,7 @@ public partial class SettingsWindow : Window
         };
         cfg.VirtualDesktopHotkey = string.IsNullOrWhiteSpace(VdHotkeyBox.Text)
             ? "" : VdHotkeyBox.Text.Trim();
+        cfg.GlobalTagsAcrossDesktops = TagScopeBox.SelectedIndex == 1;
         cfg.SuppressAltTab = SuppressBox.SelectedIndex switch
         {
             1 => true,

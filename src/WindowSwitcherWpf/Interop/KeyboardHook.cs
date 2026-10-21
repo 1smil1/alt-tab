@@ -42,6 +42,12 @@ public sealed class KeyboardHook : IDisposable
     /// N 个 Windows 虚拟桌面 (0 = 第 10 个).</summary>
     public event Action<int>? VirtualDesktopSwitch;
 
+    /// <summary>Alt+Ctrl+Shift+←/→: 把窗口搬到左 (-1) / 右 (+1) 相邻虚拟
+    /// 桌面. 语义同原生 Win+Ctrl+Shift+方向键 (只搬窗口, 不切桌面), 但
+    /// 面板开着时搬的是**选中的那张卡**, 而不是挡在面板后面的前台窗口;
+    /// 不用 Win 键是怕跟系统快捷键抢, 也因为 Win 键注入不到, 没法自测.</summary>
+    public event Action<int>? VirtualDesktopMove;
+
     /// <summary>Alt+Tab 拦截开关 (config SuppressAltTab 解析后的最终值):
     /// 开 = Alt+Tab 永远到不了系统 (被我们的 overlay 取代).</summary>
     public bool SuppressAltTabActive { get; set; }
@@ -214,7 +220,8 @@ public sealed class KeyboardHook : IDisposable
         var sc = data.scanCode;
         // 调研 log: 每次 Tab/Alt 按键回调都记 fg/pid, 验证 OS 是否在我们
         // hook 之前就决定了切换器 (回调时焦点若已是切换器窗口 = OS 先决).
-        if (vk == 0x09 || vk == 0x12 || vk == 0xA4 || vk == 0xA5)
+        if (vk == 0x09 || vk == 0x12 || vk == 0xA4 || vk == 0xA5
+            || vk == 0x25 || vk == 0x26 || vk == 0x27 || vk == 0x28)
         {
             var fg = GetForegroundWindow();
             GetWindowThreadProcessId(fg, out var fgPid);
@@ -296,6 +303,19 @@ public sealed class KeyboardHook : IDisposable
                 }
                 return new IntPtr(1);
             }
+        }
+
+        // Alt+Ctrl+Shift+←/→: 把窗口搬到相邻虚拟桌面 (原生 Win+Ctrl+Shift
+        // +方向键 的同款语义: 只搬窗口, 不切桌面). 必须排在下面"方向键 =
+        // 面板导航"之前 — 面板开着时 Alt 一定按着, 不先拦掉就变成移动选中项
+        // 而不是迁移窗口.
+        if (altHeld && !isUp && (vk == 0x25 || vk == 0x27)
+            && CtrlHeld() && ShiftHeld())
+        {
+            var dir = vk == 0x25 ? -1 : 1;
+            Log.Info("KeyboardHook", $"virtual desktop move window {(dir < 0 ? "left" : "right")}");
+            Fire(() => VirtualDesktopMove?.Invoke(dir));
+            return new IntPtr(1);
         }
 
         // Esc / 方向键 / 数字键: 必须 Alt 按着 OR overlay 开着 (第二热键
@@ -397,23 +417,20 @@ public sealed class KeyboardHook : IDisposable
         var vd = ModMask(VirtualDesktopModifierVks);
         if (vd == 0) return false;
         if ((vd & ~ModMask(QuickModifierVirtualKeys)) == 0) return false;
-        if ((vd & ModAlt) != 0
-            && (GetAsyncKeyState(0x12) & 0x8000) == 0
-            && (GetAsyncKeyState(0xA4) & 0x8000) == 0
-            && (GetAsyncKeyState(0xA5) & 0x8000) == 0) return false;
-        if ((vd & ModCtrl) != 0
-            && (GetAsyncKeyState(0x11) & 0x8000) == 0
-            && (GetAsyncKeyState(0xA2) & 0x8000) == 0
-            && (GetAsyncKeyState(0xA3) & 0x8000) == 0) return false;
-        if ((vd & ModShift) != 0
-            && (GetAsyncKeyState(0x10) & 0x8000) == 0
-            && (GetAsyncKeyState(0xA0) & 0x8000) == 0
-            && (GetAsyncKeyState(0xA1) & 0x8000) == 0) return false;
-        if ((vd & ModWin) != 0
-            && (GetAsyncKeyState(0x5B) & 0x8000) == 0
-            && (GetAsyncKeyState(0x5C) & 0x8000) == 0) return false;
+        if ((vd & ModAlt) != 0 && !AltHeld()) return false;
+        if ((vd & ModCtrl) != 0 && !CtrlHeld()) return false;
+        if ((vd & ModShift) != 0 && !ShiftHeld()) return false;
+        if ((vd & ModWin) != 0 && !WinHeld()) return false;
         return true;
     }
+
+    // 修饰键"此刻按着" — LLKHF_ALTDOWN 在 WM_KEYDOWN 上不可靠 (见
+    // reference/VirtualDesktopSwitcher/notes/dev.md), 一律现场读 async 状态.
+    private static bool KeyHeld(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
+    private static bool AltHeld() => KeyHeld(0x12) || KeyHeld(0xA4) || KeyHeld(0xA5);
+    private static bool CtrlHeld() => KeyHeld(0x11) || KeyHeld(0xA2) || KeyHeld(0xA3);
+    private static bool ShiftHeld() => KeyHeld(0x10) || KeyHeld(0xA0) || KeyHeld(0xA1);
+    private static bool WinHeld() => KeyHeld(0x5B) || KeyHeld(0x5C);
 
     // ---------- 专用泵线程的 message loop P/Invoke (self-contained) ----------
 

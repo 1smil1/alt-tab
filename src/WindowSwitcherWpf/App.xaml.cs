@@ -270,6 +270,7 @@ public partial class App : Application
         _keyboard.QuickJumpDown += OnQuickJumpDown;
         _keyboard.QuickJumpUp += OnQuickJumpUp;
         _keyboard.VirtualDesktopSwitch += OnVirtualDesktopSwitch;
+        _keyboard.VirtualDesktopMove += OnVirtualDesktopMove;
         _keyboard.Install();
 
         // Click-outside (overlay 矩形外的鼠标按键 → cancel): 需要全局 LL
@@ -461,6 +462,36 @@ public partial class App : Application
     {
         var number = digit == 0 ? 10 : digit;
         SwitchVirtualDesktop(number - 1);
+    }
+
+    /// <summary>Win+Ctrl+Shift+←/→: 把窗口搬到相邻虚拟桌面 (原生同款语义:
+    /// 只搬窗口, 不切桌面). 面板开着时搬的是选中的卡.</summary>
+    private void OnVirtualDesktopMove(int delta)
+    {
+        var list = VirtualDesktop.List();
+        var curIdx = VirtualDesktop.CurrentIndex;
+        if (curIdx < 0)
+        {
+            Log.Warn("App", "virtual desktop move: 拿不到当前桌面序号");
+            return;
+        }
+        var target = curIdx + delta;
+        if (target < 0 || target >= list.Count)
+        {
+            Log.Info("App", $"virtual desktop move: 相邻桌面不存在 (cur={curIdx + 1}, delta={delta})");
+            return;
+        }
+        // 面板开着搬选中的卡, 否则搬前台窗口 (原生同款语义).
+        var from = _overlay?.SelectedHwnd ?? IntPtr.Zero;
+        if (from == IntPtr.Zero)
+            from = NativeMethods.GetForegroundWindow();
+        if (from == IntPtr.Zero)
+        {
+            Log.Warn("App", "virtual desktop move: 没有目标窗口");
+            return;
+        }
+        var ok = _controller!.MoveToDesktop(from, list[target].Id);
+        Log.Info("App", $"virtual desktop move 0x{from.ToInt64():X} → 桌面{target + 1} ok={ok}");
     }
 
     /// <summary>面板里的桌面槽位被点: 收掉面板 (面板属于当前桌面, 留着会被
@@ -1322,6 +1353,10 @@ public partial class App : Application
             !HotkeyParser.TryParseModifiers("", out _)
             && !HotkeyParser.TryParseModifiers(null, out _)
             && !HotkeyParser.TryParseModifiers("Alt+Nope", out _));
+
+        // 标签范围默认按虚拟桌面分开 (与原生 Alt+Tab 一致).
+        Check("tag-scope-default-per-desktop",
+            !ConfigStore.DefaultConfig().GlobalTagsAcrossDesktops);
 
         // 缩小化开关解析: pinned null = 跟随 flow, flow null = 否.
         var R = SwitcherController.ResolveMinimize;

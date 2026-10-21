@@ -111,6 +111,7 @@ public sealed class ConfigStore
         SecondHotkey = "Alt+`",
         QuickJumpModifier = "Alt",
         VirtualDesktopHotkey = "Alt+Ctrl",
+        GlobalTagsAcrossDesktops = false,
         SuppressAltTab = null,
         AutoStart = true,
     };
