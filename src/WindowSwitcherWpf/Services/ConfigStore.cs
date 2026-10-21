@@ -80,6 +80,7 @@ public sealed class ConfigStore
             cfg.QuickJumpModifier ??= dft.QuickJumpModifier;
             cfg.VirtualDesktopHotkey ??= dft.VirtualDesktopHotkey;
             cfg.MoveWindowHotkey ??= dft.MoveWindowHotkey;
+            cfg.MigrateCardHotkey ??= dft.MigrateCardHotkey;
             cfg.AutoStart ??= dft.AutoStart;
             Log.Info("Config", "loaded config.json");
             return cfg;
@@ -113,6 +114,7 @@ public sealed class ConfigStore
         QuickJumpModifier = "Alt",
         VirtualDesktopHotkey = "Alt+Ctrl",
         MoveWindowHotkey = "Alt+Ctrl+Shift",
+        MigrateCardHotkey = "Alt+Ctrl",
         GlobalTagsAcrossDesktops = false,
         SuppressAltTab = null,
         AutoStart = true,

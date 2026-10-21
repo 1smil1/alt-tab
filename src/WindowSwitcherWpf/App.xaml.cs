@@ -292,6 +292,7 @@ public partial class App : Application
         _keyboard.QuickJumpUp += OnQuickJumpUp;
         _keyboard.VirtualDesktopSwitch += OnVirtualDesktopSwitch;
         _keyboard.VirtualDesktopMove += OnVirtualDesktopMove;
+        _keyboard.VirtualDesktopMoveCard += OnVirtualDesktopMoveCard;
         _keyboard.Install();
 
         // Click-outside (overlay 矩形外的鼠标按键 → cancel): 需要全局 LL
@@ -465,6 +466,19 @@ public partial class App : Application
             hook.VirtualDesktopModifierVks = Array.Empty<uint>();
             Log.Info("App", $"virtual desktop hotkey '{vdPrefix ?? "<null>"}' — disabled");
         }
+        // 迁卡片热键: 面板开着时前缀 + 数字 → 把选中的卡迁到第 N 个桌面.
+        var cardPrefix = _controller.Config.MigrateCardHotkey;
+        if (HotkeyParser.TryParseModifiers(cardPrefix, out var cardMods))
+        {
+            hook.MigrateCardModifierVks = cardMods;
+            Log.Info("App", $"migrate card hotkey '{cardPrefix}' + 数字 → " +
+                $"vks=[{string.Join(',', cardMods.Select(v => $"0x{v:X2}"))}]");
+        }
+        else
+        {
+            hook.MigrateCardModifierVks = Array.Empty<uint>();
+            Log.Info("App", $"migrate card hotkey '{cardPrefix ?? "<null>"}' — disabled");
+        }
         // 迁移窗口热键: 前缀 (只修饰键) + ←/→ → 搬到相邻虚拟桌面.
         var mvPrefix = _controller.Config.MoveWindowHotkey;
         if (HotkeyParser.TryParseModifiers(mvPrefix, out var mvMods))
@@ -526,6 +540,32 @@ public partial class App : Application
         }
         var ok = _controller!.MoveToDesktop(from, list[target].Id);
         Log.Info("App", $"virtual desktop move 0x{from.ToInt64():X} → 桌面{target + 1} ok={ok}");
+    }
+
+    /// <summary>面板开着时按 Alt+Ctrl+N: 把选中的卡迁到第 N 个桌面
+    /// (面板关着时同样的键是"切桌面").</summary>
+    private void OnVirtualDesktopMoveCard(int digit)
+    {
+        var index = (digit == 0 ? 10 : digit) - 1;
+        var list = VirtualDesktop.List();
+        if (index < 0 || index >= list.Count)
+        {
+            Log.Info("App", $"migrate card: 桌面{digit} 不存在 (共 {list.Count} 个)");
+            return;
+        }
+        var hwnd = _overlay?.SelectedHwnd ?? IntPtr.Zero;
+        if (hwnd == IntPtr.Zero)
+        {
+            Log.Warn("App", "migrate card: 面板里没有选中的卡片");
+            return;
+        }
+        if (list[index].Id == VirtualDesktop.CurrentGuid)
+        {
+            Log.Info("App", $"migrate card: 卡片已经在 桌面{digit} 上");
+            return;
+        }
+        var ok = _controller!.MoveToDesktop(hwnd, list[index].Id);
+        Log.Info("App", $"migrate card 0x{hwnd.ToInt64():X} → 桌面{index + 1} ok={ok}");
     }
 
     /// <summary>面板里的桌面槽位被点: 收掉面板 (面板属于当前桌面, 留着会被
@@ -1397,6 +1437,11 @@ public partial class App : Application
 
         Check("tag-scope-default-per-desktop",
             !ConfigStore.DefaultConfig().GlobalTagsAcrossDesktops);
+
+        Check("migrate-card-hotkey-default-parses",
+            HotkeyParser.TryParseModifiers(
+                ConfigStore.DefaultConfig().MigrateCardHotkey, out var mcMods)
+            && mcMods.Length > 0);
 
         // 缩小化开关解析: pinned null = 跟随 flow, flow null = 否.
         var R = SwitcherController.ResolveMinimize;

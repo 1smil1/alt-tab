@@ -61,6 +61,11 @@ public sealed class ConfigFile
     /// 那个是"一次直达窗口"的修饰键, 这个是"切虚拟桌面"的.</summary>
     public string? VirtualDesktopHotkey { get; set; }
 
+    /// <summary>面板开着时"把选中的卡迁到第 N 个桌面"的前缀 (后面跟数字,
+    /// 0 = 第 10 个). 默认与 <see cref="VirtualDesktopHotkey"/> 相同:
+    /// 面板关着 = 切桌面, 面板开着 = 迁卡片. null/空 = 关闭.</summary>
+    public string? MigrateCardHotkey { get; set; }
+
     /// <summary>迁移窗口热键的**修饰键前缀** ("Alt+Ctrl+Shift"), 后面跟
     /// ←/→ = 把窗口/选中的卡片搬到左/右相邻虚拟桌面. null/空 = 关闭.</summary>
     public string? MoveWindowHotkey { get; set; }

@@ -48,6 +48,15 @@ public sealed class KeyboardHook : IDisposable
     /// 不用 Win 键是怕跟系统快捷键抢, 也因为 Win 键注入不到, 没法自测.</summary>
     public event Action<int>? VirtualDesktopMove;
 
+    /// <summary>面板开着时按"迁卡片热键"前缀+数字 = 把**选中的那张卡**迁到
+    /// 第 N 个桌面 (0 = 第 10 个). 面板关着时同样的组合是"切桌面" — 两种
+    /// 语义按面板开合分开, 互不抢. 拖到 chip 上仍然是另一条路.</summary>
+    public event Action<int>? VirtualDesktopMoveCard;
+
+    /// <summary>迁卡片热键的修饰键 (默认 Alt+Ctrl), 后面跟数字.
+    /// 空数组 = 关闭.</summary>
+    public uint[] MigrateCardModifierVks { get; set; } = Array.Empty<uint>();
+
     /// <summary>迁移窗口热键的修饰键 (默认 Alt+Ctrl+Shift), 后面跟 ←/→.
     /// 解析失败/留空 = 空数组 = 该功能关闭.</summary>
     public uint[] MoveWindowModifierVks { get; set; } = Array.Empty<uint>();
@@ -318,6 +327,18 @@ public sealed class KeyboardHook : IDisposable
             }
         }
 
+        // 面板开着 + 虚拟桌面热键前缀 + 数字 → 把选中的卡迁到第 N 个桌面.
+        // 必须排在下面"数字 = 跳位置号"之前, 不然就变成在跳编号.
+        if (_overlayOpen && !isUp
+            && MigrateCardModsHeld()
+            && vk is >= 0x30 and <= 0x39 or >= 0x60 and <= 0x69)
+        {
+            var n = DigitFromVk(vk);
+            Log.Info("KeyboardHook", $"virtual desktop move card {n}");
+            Fire(() => VirtualDesktopMoveCard?.Invoke(n));
+            return new IntPtr(1);
+        }
+
         // Alt+Ctrl+Shift+←/→: 把窗口搬到相邻虚拟桌面 (原生 Win+Ctrl+Shift
         // +方向键 的同款语义: 只搬窗口, 不切桌面). 必须排在下面"方向键 =
         // 面板导航"之前 — 面板开着时 Alt 一定按着, 不先拦掉就变成移动选中项
@@ -433,6 +454,20 @@ public sealed class KeyboardHook : IDisposable
         if ((vd & ModCtrl) != 0 && !CtrlHeld()) return false;
         if ((vd & ModShift) != 0 && !ShiftHeld()) return false;
         if ((vd & ModWin) != 0 && !WinHeld()) return false;
+        return true;
+    }
+
+    /// <summary>迁卡片热键此刻是否完整按住 (面板开着才有意义 — 面板关着
+    /// 时同一组合是"切桌面", 归 <see cref="VirtualDesktopModsHeld"/> 管).</summary>
+    private bool MigrateCardModsHeld()
+    {
+        var m = ModMask(MigrateCardModifierVks);
+        if (m == 0) return false;
+        if ((m & ~ModMask(QuickModifierVirtualKeys)) == 0) return false;
+        if ((m & ModAlt) != 0 && !AltHeld()) return false;
+        if ((m & ModCtrl) != 0 && !CtrlHeld()) return false;
+        if ((m & ModShift) != 0 && !ShiftHeld()) return false;
+        if ((m & ModWin) != 0 && !WinHeld()) return false;
         return true;
     }
 

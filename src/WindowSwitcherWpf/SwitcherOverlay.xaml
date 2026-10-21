@@ -35,7 +35,7 @@
             <!-- Sub view banner (子标签页面): stack title + member count +
                  gesture hints; replaces the main header while active. -->
             <StackPanel x:Name="StackHeader"
-                        Grid.Row="0"
+                        Grid.Row="1"
                         HorizontalAlignment="Left"
                         Orientation="Horizontal"
                         Visibility="Collapsed"
@@ -63,7 +63,7 @@
             </StackPanel>
             <!-- Header (右上角): 状态提示 + 编辑 + 设置入口. -->
             <StackPanel x:Name="MainHeader"
-                        Grid.Row="0"
+                        Grid.Row="1"
                         HorizontalAlignment="Right"
                         Orientation="Horizontal"
                         Margin="0,0,0,10">
@@ -92,12 +92,17 @@
 
             <!-- 桌面槽位行: 一行虚拟桌面徽章. 当前桌面高亮; 点 = 切过去;
                  编辑模式下把卡片拖到某个槽位 = 把窗口迁到那个桌面. -->
-            <StackPanel x:Name="DesktopBarRow"
-                        Grid.Row="1"
-                        Orientation="Horizontal"
-                        HorizontalAlignment="Left"
-                        Margin="0,0,0,8"
-                        Visibility="Collapsed">
+            <!-- 桌面槽位带: 面板最顶一条整宽横条, 跟卡片区分开. 这一整条都
+                 是"拖到某个虚拟桌面"的落点区, 不需要瞄胶囊本体. -->
+            <Border x:Name="DesktopBarRow"
+                    Grid.Row="0"
+                    Background="#12FFFFFF"
+                    BorderBrush="#30FFFFFF"
+                    BorderThickness="0,0,0,1"
+                    Padding="9,6"
+                    Margin="0,0,0,10"
+                    Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
                 <ItemsControl x:Name="DesktopBar" VerticalAlignment="Center">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
@@ -120,6 +125,11 @@
                                         <DataTrigger Binding="{Binding IsCurrent}" Value="True">
                                             <Setter Property="Background" Value="#FF0078D4"/>
                                             <Setter Property="BorderBrush" Value="#FF005A9E"/>
+                                        </DataTrigger>
+                                        <!-- 拖拽时的落点: 琥珀高亮, 跟其它状态都不撞 -->
+                                        <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
+                                            <Setter Property="Background" Value="#FFD97706"/>
+                                            <Setter Property="BorderBrush" Value="#FF9A4D00"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
@@ -165,6 +175,12 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
+                <TextBlock x:Name="DesktopDropHint"
+                           Text="← 拖卡片到这条上 = 把窗口迁到那个桌面"
+                           FontSize="11"
+                           Foreground="#80FFFFFF"
+                           VerticalAlignment="Center"
+                           Margin="4,0,0,0"/>
                 <Border x:Name="NewDesktopChip"
                         Margin="0,0,0,0"
                         Padding="9,2"
@@ -179,6 +195,7 @@
                                Foreground="#FF404040"/>
                 </Border>
             </StackPanel>
+            </Border>
 
             <TextBlock x:Name="EmptyDesktopHint"
                        Grid.Row="2"
@@ -442,7 +459,7 @@
                  so empty areas still pass through. Decorative children
                  opt out individually. -->
             <Canvas x:Name="DropLayer"
-                    Grid.Row="1">
+                    Grid.Row="2">
                 <Rectangle x:Name="LineIndicator"
                            Width="4"
                            RadiusX="2" RadiusY="2"

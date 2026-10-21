@@ -104,6 +104,20 @@
                             <ColumnDefinition Width="130"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
+                        <TextBlock Text="迁卡片热键" Foreground="#FFE0E0E0"
+                                   VerticalAlignment="Center"
+                                   ToolTip="面板开着时的前缀 + 数字"/>
+                        <TextBox x:Name="MigrateCardBox" Grid.Column="1"
+                                 TextChanged="OnVdHotkeyChanged"/>
+                    </Grid>
+                    <TextBlock Text='**面板开着**时用: 前缀 + 数字把选中的卡直接迁到第 N 个桌面, 免得拖. 跟拖到上面的桌面胶囊是两条路, 都能用. 默认 "Alt+Ctrl"+数字, 空 = 关闭.'
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
                         <TextBlock Text="标签范围" Foreground="#FFE0E0E0"
                                    VerticalAlignment="Center"/>
                         <ComboBox x:Name="TagScopeBox" Grid.Column="1" SelectedIndex="0">

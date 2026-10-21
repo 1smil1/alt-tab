@@ -108,6 +108,10 @@ public partial class SwitcherOverlay : Window
                 d.Id == current, list.Count >= 2));
         }
         DesktopBarRow.Visibility = list.Count >= 1 ? Visibility.Visible : Visibility.Collapsed;
+        // 只有一个桌面 = 没处可迁, 提示文字就多余.
+        if (DesktopDropHint is not null)
+            DesktopDropHint.Visibility = list.Count >= 2
+                ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>删掉这个虚拟桌面. 删当前桌面 = 面板自己所在的桌面没了,
@@ -164,6 +168,18 @@ public partial class SwitcherOverlay : Window
         return "";
     }
 
+    /// <summary>点亮/熄灭"落点 chip" (拖拽迁桌面时的靶子).</summary>
+    private void SetDesktopDropTarget(DesktopChip? chip)
+    {
+        foreach (var d in _desktops)
+            if (d.IsDropTarget != ReferenceEquals(d, chip)) d.IsDropTarget = ReferenceEquals(d, chip);
+        // 整行也铺一层底色 — 胶囊之间的空隙/行边缘照样算落点, 用户不用瞄.
+        DesktopBarRow.Background = chip is null
+            ? System.Windows.Media.Brushes.Transparent
+            : new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromArgb(0x28, 0xD9, 0x77, 0x06));
+    }
+
     /// <summary>指针下的桌面槽位 (坐标相对 DesktopBar).</summary>
     private DesktopChip? DesktopChipAt(Point p)
     {
@@ -176,6 +192,36 @@ public partial class SwitcherOverlay : Window
             if (r.Contains(p)) return _desktops[i];
         }
         return null;
+    }
+
+    /// <summary>桌面槽位行的落点判定 (坐标相对面板). 指针只要落在整行里就算
+    /// 落点 — 胶囊之间的空隙、行边缘、胶囊留白全部吃掉 — 没命中精确矩形就
+    /// 取最近的一颗胶囊. 之前只认胶囊本体, 手一抖就掉回"排序"去了, 是这条
+    /// 路一直不灵的最大原因.</summary>
+    private DesktopChip? DesktopDropChipAt(Point overlayPoint)
+    {
+        if (_desktops.Count == 0) return null;
+        if (DesktopBarRow.Visibility != Visibility.Visible) return null;
+        var row = new Rect(0, 0, DesktopBarRow.ActualWidth, DesktopBarRow.ActualHeight);
+        if (!row.Contains(overlayPoint)) return null;
+        var inBar = DesktopBar.PointFromScreen(this.PointFromScreen(overlayPoint));
+        return DesktopChipAt(inBar) ?? NearestDesktopChip(overlayPoint);
+    }
+
+    /// <summary>距指针最近的胶囊 (中心距, 只看 X — 行是横的).</summary>
+    private DesktopChip? NearestDesktopChip(Point overlayPoint)
+    {
+        DesktopChip? best = null;
+        var bestD = double.MaxValue;
+        for (var i = 0; i < _desktops.Count; i++)
+        {
+            if (DesktopBar.ItemContainerGenerator.ContainerFromIndex(i) is not ContentPresenter cp) continue;
+            if (DesktopBar.ItemTemplate?.FindName("DesktopChip", cp) is not FrameworkElement chip) continue;
+            var topLeft = this.PointFromScreen(chip.PointToScreen(new Point(0, 0)));
+            var d = Math.Abs(topLeft.X + chip.ActualWidth / 2 - overlayPoint.X);
+            if (d < bestD) { bestD = d; best = _desktops[i]; }
+        }
+        return best;
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -2366,25 +2412,34 @@ public partial class SwitcherOverlay : Window
     /// gap insert otherwise.</summary>
     private void OnOverlayMouseUp(object sender, MouseButtonEventArgs e)
     {
-        if (!_dragActive) { EndDrag(); return; }
+        if (!_dragActive) { SetDesktopDropTarget(null); EndDrag(); return; }
         var dragHwnd = _dragHwnd;
         var fromStrip = _dragFromFanStrip;
         EndDrag();
         if (dragHwnd == IntPtr.Zero) return;
-        // 编辑模式: 拖到桌面槽位上 = 把窗口迁到那个桌面 (迁走后它离开当前
-        // 桌面, 面板里这张卡随之消失).
-        if (EditMode && !_controller.IsInStackView && _desktops.Count >= 2)
+        // 拖到桌面槽位行上 = 把窗口迁到那个桌面 (迁走后它离开当前桌面, 面板
+        // 里这张卡随之消失). 不限编辑模式 —— 只看有没有 ≥2 个桌面, 不看模式.
+        if (!_controller.IsInStackView && _desktops.Count >= 2)
         {
-            var chip = DesktopChipAt(e.GetPosition(DesktopBar));
+            var chip = DesktopDropChipAt(e.GetPosition(this));
             if (chip is not null)
             {
-                if (chip.Id != VirtualDesktop.CurrentGuid
-                    && _controller.MoveToDesktop(dragHwnd, chip.Id))
+                if (chip.Id == VirtualDesktop.CurrentGuid)
                 {
                     WindowSwitcherWpf.Services.Log.Info("Overlay",
-                        $"migrate window → {chip.Label}");
+                        $"migrate window → {chip.Label} 取消 (就在这个桌面)");
+                }
+                else if (_controller.MoveToDesktop(dragHwnd, chip.Id))
+                {
+                    WindowSwitcherWpf.Services.Log.Info("Overlay",
+                        $"migrate window 0x{dragHwnd.ToInt64():X} → {chip.Label} ok");
                     RefreshDesktops();
                     RebuildFromSlots(preserveScroll: true);
+                }
+                else
+                {
+                    WindowSwitcherWpf.Services.Log.Info("Overlay",
+                        $"migrate window 0x{dragHwnd.ToInt64():X} → {chip.Label} 失败");
                 }
                 return;
             }
@@ -2513,6 +2568,7 @@ public partial class SwitcherOverlay : Window
         _dragHwnd = IntPtr.Zero;
         _dragActive = false;
         _dragFromFanStrip = false;
+        SetDesktopDropTarget(null);
         HideDropIndicators();
     }
 
@@ -2534,6 +2590,21 @@ public partial class SwitcherOverlay : Window
 
         if (!_dragActive) return;
         if (e.LeftButton != MouseButtonState.Pressed) { EndDrag(); return; }
+        // 指针压在桌面槽位行上 = 准备迁桌面, 不是排序. 先把"插到哪张卡
+        // 前面"的预览全部撤掉 (它在同一个 Grid.Row 里, 会盖住槽位), 只留
+        // 一颗亮起来的 chip 当靶子 — 不然用户只会看到左上角有个"最近标签"
+        // 的插入预览, 以为要丢在那儿.
+        if (!_controller.IsInStackView && _desktops.Count >= 2)
+        {
+            var chip = DesktopDropChipAt(e.GetPosition(this));
+            SetDesktopDropTarget(chip);
+            if (chip is not null)
+            {
+                HideDropIndicators();
+                return;
+            }
+        }
+        SetDesktopDropTarget(null);
         var p = e.GetPosition(WindowsList);
         if (!_controller.IsInStackView && CascadeAt(p) is { } c)
         {
@@ -2977,6 +3048,19 @@ public sealed class DesktopChip : System.ComponentModel.INotifyPropertyChanged
         Label = label;
         CanDelete = canDelete;
         _isCurrent = isCurrent;
+    }
+
+    /// <summary>拖拽时指针压在这颗 chip 上 = 落点 (亮起来当靶子).</summary>
+    private bool _isDropTarget;
+    public bool IsDropTarget
+    {
+        get => _isDropTarget;
+        set
+        {
+            if (_isDropTarget == value) return;
+            _isDropTarget = value;
+            PropertyChanged?.Invoke(this, new(nameof(IsDropTarget)));
+        }
     }
 
     /// <summary>只剩一个桌面时不能删 — ✕ 隐藏.</summary>

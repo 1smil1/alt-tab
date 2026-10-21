@@ -13,6 +13,16 @@ This is the first version. The default hotkey is **Alt+`** (backtick). The syste
 - Same-application grouping (each visible window is its own card)
 - Group key for pinned order persisted in `%APPDATA%\WindowSwitcherWpf\order.json`
 - Single-instance via named mutex; tray icon with Reload / Open config folder / Exit
+- Windows virtual desktop support (undocumented COM, gated per Windows build):
+  - switch desktops with a configurable prefix + digit (`Alt+Ctrl`+`2`)
+  - move a window to the adjacent desktop with a configurable prefix + arrow keys
+    (`Alt+Ctrl+Shift`+`←`/`→`)
+  - drag a card onto the desktop bar at the top of the panel to move that window to
+    another desktop, or press the migrate prefix + digit while the panel is open
+  - desktop bar shows every desktop, highlights the current one, `✕` deletes it, `+`
+    creates one
+  - tag scope is configurable: per-desktop (Windows Alt+Tab behaviour, the default)
+    or one shared list across all desktops
 - Single hotkey: hold Alt, tap ` to cycle, release Alt to commit, Esc to cancel
 - Arrow keys cycle, Enter commits
 - `--debug-enum` CLI mode prints the live enumeration for verification
@@ -52,6 +62,25 @@ Key reference files we read:
 - `src/keyboard.rs` — WH_KEYBOARD_LL state machine (tap-once, hold-and-cycle)
 - `src/painter.rs` — overlay rendering patterns
 - `src/foreground.rs` — SetWinEventHook blacklist pattern
+
+### Virtual desktop references
+
+The Windows virtual desktop support (`Interop/VirtualDesktop.cs`) is written from
+scratch against undocumented COM interfaces, using these projects as reference.
+Source copies live under [`reference/`](reference/README.md) (not compiled, not
+modified):
+
+| Project | ★ | License | What we took from it |
+|---|---|---|---|
+| [dankrusi/WindowsVirtualDesktopHelper](https://github.com/dankrusi/WindowsVirtualDesktopHelper) | 966 | MIT | COM interop layout and the per-Windows-build dispatch (`VirtualDesktopWin11_23H2_2921` is what this machine, build 22631.6199, uses) |
+| [MScholtes/VirtualDesktop](https://github.com/MScholtes/VirtualDesktop) | 794 | MIT | Minimal call sequence to switch desktops (`GetCount` / `GetDesktops` / `GetCurrentDesktop` / `SwitchDesktop`) and the 24H2 vtable difference |
+| [choyy/VirtualDesktopSwitcher](https://github.com/choyy/VirtualDesktopSwitcher) | 169 | MIT | Interaction design: desktop hotkeys, dragging a window onto a desktop indicator, pinning windows to all desktops; its `notes/dev.md` documents two traps — `LLKHF_ALTDOWN` and `IsWindowOnCurrentVirtualDesktop` are unreliable |
+
+Both MIT licenses are preserved in their `reference/` subdirectories, and our
+rewritten interop files keep the original attribution in their headers.
+`reference/README.md` also lists the higher-starred alternatives we rejected
+(AutoHotkey wrappers, DLL shims, and one project that fakes desktops with
+`ShowWindow` instead of using real ones) and why.
 
 ## Roadmap
 
