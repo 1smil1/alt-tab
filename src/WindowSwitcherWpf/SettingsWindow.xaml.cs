@@ -35,6 +35,7 @@ public partial class SettingsWindow : Window
         };
         VdHotkeyBox.Text = cfg.VirtualDesktopHotkey ?? "";
         TagScopeBox.SelectedIndex = cfg.GlobalTagsAcrossDesktops ? 1 : 0;
+        MoveHotkeyBox.Text = cfg.MoveWindowHotkey ?? "";
         SuppressBox.SelectedIndex = cfg.SuppressAltTab switch
         {
             null => 0,
@@ -80,6 +81,10 @@ public partial class SettingsWindow : Window
         var vd = VdHotkeyBox?.Text ?? "";
         var vdOk = string.IsNullOrWhiteSpace(vd)
             || HotkeyParser.TryParseModifiers(vd, out _);
+        // 迁移窗口热键: 空 = 禁用 (合法); 非空 = 只能是修饰键.
+        var mv = MoveHotkeyBox?.Text ?? "";
+        var mvOk = string.IsNullOrWhiteSpace(mv)
+            || HotkeyParser.TryParseModifiers(mv, out _);
         HotkeyBox.Background = ok
             ? System.Windows.Media.Brushes.Gray
             : System.Windows.Media.Brushes.IndianRed;
@@ -91,10 +96,15 @@ public partial class SettingsWindow : Window
             VdHotkeyBox.Background = vdOk
                 ? System.Windows.Media.Brushes.Gray
                 : System.Windows.Media.Brushes.IndianRed;
-        SaveButton.IsEnabled = ok && secondOk && vdOk;
+        if (MoveHotkeyBox is not null)
+            MoveHotkeyBox.Background = mvOk
+                ? System.Windows.Media.Brushes.Gray
+                : System.Windows.Media.Brushes.IndianRed;
+        SaveButton.IsEnabled = ok && secondOk && vdOk && mvOk;
         StatusText.Text = !ok ? "主快捷键无效 (须含 Alt)"
             : !secondOk ? "第二快捷键无效 (须含 Alt 或留空)"
             : !vdOk ? "虚拟桌面热键无效 (只填修饰键, 如 Alt+Ctrl)"
+            : !mvOk ? "迁移窗口热键无效 (只填修饰键, 如 Alt+Ctrl+Shift)"
             : "";
     }
 
@@ -118,6 +128,8 @@ public partial class SettingsWindow : Window
         cfg.VirtualDesktopHotkey = string.IsNullOrWhiteSpace(VdHotkeyBox.Text)
             ? "" : VdHotkeyBox.Text.Trim();
         cfg.GlobalTagsAcrossDesktops = TagScopeBox.SelectedIndex == 1;
+        cfg.MoveWindowHotkey = string.IsNullOrWhiteSpace(MoveHotkeyBox.Text)
+            ? "" : MoveHotkeyBox.Text.Trim();
         cfg.SuppressAltTab = SuppressBox.SelectedIndex switch
         {
             1 => true,

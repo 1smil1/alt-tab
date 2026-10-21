@@ -144,6 +144,24 @@ public static class VirtualDesktop
         void WaitForAnimationToComplete();
     }
 
+    /// <summary>shell 的窗口视图集合 — 跨进程搬窗口的钥匙. 公开的
+    /// <see cref="IVirtualDesktopManager.MoveWindowToDesktop"/> 只对**本进程
+    /// 拥有**的窗口有效, 别的进程的窗口一律 0x80070005; 上游 MScholtes 也是
+    /// 搬不动就退回 MoveViewToDesktop (见 reference/VirtualDesktop/VirtualDesktop.cs
+    /// 的 MoveWindow). 声明到 GetViewForHwnd 为止, 只取 view 的裸指针 — 
+    /// 不调 view 的任何方法, 也不需要 IInspectable 头.</summary>
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("1841C6D7-4F9D-42C0-AF41-8747538F10E5")]
+    internal interface IApplicationViewCollection
+    {
+        int GetViews(out IObjectArray array);
+        int GetViewsByZOrder(out IObjectArray array);
+        int GetViewsByAppUserModelId(
+            [MarshalAs(UnmanagedType.LPWStr)] string id, out IObjectArray array);
+        int GetViewForHwnd(IntPtr hwnd, out IntPtr view);
+    }
+
     /// <summary>公开 COM (1903+): vtable 稳定, 查/移窗口所属桌面用.
     /// Phase 2 (卡上显示桌面号) 与 Phase 3 (迁窗口) 走这里.</summary>
     [ComImport]
@@ -158,6 +176,7 @@ public static class VirtualDesktop
 
     private static IVirtualDesktopManagerInternal? _manager;
     private static IVirtualDesktopManager? _publicManager;
+    private static IApplicationViewCollection? _viewCollection;
     private static bool _probed;
 
     /// <summary>桌面数量 (0 = 不可用).</summary>
@@ -398,8 +417,53 @@ public static class VirtualDesktop
             var mgr = GetPublicManager();
             if (mgr is null) return false;
             var id = desktopId; // ref 参数 → 需要可写副本
-            mgr.MoveWindowToDesktop(hwnd, ref id);
-            Log.Info("VirtualDesktop", $"move window 0x{hwnd.ToInt64():X} → {desktopId}");
+            try
+            {
+                mgr.MoveWindowToDesktop(hwnd, ref id);
+                Log.Info("VirtualDesktop", $"move window 0x{hwnd.ToInt64():X} → {desktopId}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // 公开 API 只认本进程拥有的窗口, 别人的窗口一律 E_ACCESSDENIED.
+                // 不是权限问题 (提权也救不了) — 换内部 API 的 view 路线.
+                Log.Verbose("VirtualDesktop",
+                    $"public MoveWindowToDesktop 拒绝 (0x{hwnd.ToInt64():X}): {ex.Message}, 走内部 view 路线");
+            }
+            return MoveViewToDesktop(hwnd, desktopId);
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("VirtualDesktop", ex);
+            return false;
+        }
+    }
+
+    /// <summary>跨进程搬窗口: hwnd → shell 的 IApplicationView → 内部
+    /// MoveViewToDesktop. 公开 COM 摆不平别的进程的窗口 (一律 E_ACCESSDENIED),
+    /// 只有这条路.</summary>
+    private static bool MoveViewToDesktop(IntPtr hwnd, Guid desktopId)
+    {
+        var views = GetViewCollection();
+        var mgr = GetManager();
+        if (views is null || mgr is null) return false;
+        try
+        {
+            if (views.GetViewForHwnd(hwnd, out var view) != 0 || view == IntPtr.Zero)
+            {
+                Log.Warn("VirtualDesktop",
+                    $"GetViewForHwnd(0x{hwnd.ToInt64():X}) 失败 — 该窗口没有 shell view (UWP/受保护窗口?)");
+                return false;
+            }
+            var id = desktopId;
+            var desktop = mgr.FindDesktop(ref id);
+            if (desktop is null)
+            {
+                Log.Warn("VirtualDesktop", $"FindDesktop({desktopId}) 返回空");
+                return false;
+            }
+            mgr.MoveViewToDesktop(view, desktop);
+            Log.Info("VirtualDesktop", $"move view 0x{hwnd.ToInt64():X} → {desktopId}");
             return true;
         }
         catch (Exception ex)
@@ -440,6 +504,25 @@ public static class VirtualDesktop
             _manager = null;
         }
         return _manager;
+    }
+
+    private static IApplicationViewCollection? GetViewCollection()
+    {
+        if (_viewCollection is not null) return _viewCollection;
+        try
+        {
+            var shell = (IServiceProvider10)Activator.CreateInstance(
+                Type.GetTypeFromCLSID(CLSID_ImmersiveShell)!);
+            var iid = new Guid("1841C6D7-4F9D-42C0-AF41-8747538F10E5");
+            _viewCollection = (IApplicationViewCollection)shell.QueryService(
+                ref iid, ref iid);
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("VirtualDesktop", ex);
+            _viewCollection = null;
+        }
+        return _viewCollection;
     }
 
     private static IVirtualDesktopManager? GetPublicManager()

@@ -90,6 +90,20 @@
                             <ColumnDefinition Width="130"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
+                        <TextBlock Text="迁移窗口热键" Foreground="#FFE0E0E0"
+                                   VerticalAlignment="Center"
+                                   ToolTip="修饰键前缀 + ←/→"/>
+                        <TextBox x:Name="MoveHotkeyBox" Grid.Column="1"
+                                 TextChanged="OnVdHotkeyChanged"/>
+                    </Grid>
+                    <TextBlock Text='前缀 + 方向键: 把窗口 (面板开着时是选中的那张卡) 搬到左/右相邻虚拟桌面. 默认 "Alt+Ctrl+Shift"+←/→, 空 = 关闭.'
+                               FontSize="11" Foreground="#FF909090" Margin="0,4,0,0"
+                               TextWrapping="Wrap"/>
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
                         <TextBlock Text="标签范围" Foreground="#FFE0E0E0"
                                    VerticalAlignment="Center"/>
                         <ComboBox x:Name="TagScopeBox" Grid.Column="1" SelectedIndex="0">

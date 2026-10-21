@@ -61,6 +61,10 @@ public sealed class ConfigFile
     /// 那个是"一次直达窗口"的修饰键, 这个是"切虚拟桌面"的.</summary>
     public string? VirtualDesktopHotkey { get; set; }
 
+    /// <summary>迁移窗口热键的**修饰键前缀** ("Alt+Ctrl+Shift"), 后面跟
+    /// ←/→ = 把窗口/选中的卡片搬到左/右相邻虚拟桌面. null/空 = 关闭.</summary>
+    public string? MoveWindowHotkey { get; set; }
+
     /// <summary>面板标签是否**跨虚拟桌面共用一份**. false (默认, 与 Windows
     /// 原生 Alt+Tab 和主流工具一致) = 每个虚拟桌面只显示自己的窗口;
     /// true = 全局一份, 别的桌面的窗口也列出来 (卡片带 D号 角标).</summary>

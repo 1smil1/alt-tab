@@ -48,6 +48,10 @@ public sealed class KeyboardHook : IDisposable
     /// 不用 Win 键是怕跟系统快捷键抢, 也因为 Win 键注入不到, 没法自测.</summary>
     public event Action<int>? VirtualDesktopMove;
 
+    /// <summary>迁移窗口热键的修饰键 (默认 Alt+Ctrl+Shift), 后面跟 ←/→.
+    /// 解析失败/留空 = 空数组 = 该功能关闭.</summary>
+    public uint[] MoveWindowModifierVks { get; set; } = Array.Empty<uint>();
+
     /// <summary>Alt+Tab 拦截开关 (config SuppressAltTab 解析后的最终值):
     /// 开 = Alt+Tab 永远到不了系统 (被我们的 overlay 取代).</summary>
     public bool SuppressAltTabActive { get; set; }
@@ -79,6 +83,11 @@ public sealed class KeyboardHook : IDisposable
     private volatile bool _pumpAlive;
     private volatile bool _stopRequested;
     private bool _altDown;
+    // Shift/Ctrl 也自己跟一份: GetAsyncKeyState 在 LL 钩子里读修饰键有已知的
+    // 不可靠窗口 (按键刚按下时异步状态还没更新), 实测注入按键时 Shift 恒读到
+    // False. async 读数与钩子跟踪取或, 谁先更新用谁.
+    private volatile bool _shiftDown;
+    private volatile bool _ctrlDown;
     private volatile bool _overlayOpen;      // UI 线程 SetOverlayOpen 跨线程写
     // 一次直达状态: quick 修饰键是否按住 + 当前按住的数字 vk (0=无)
     private bool _quickModDown;
@@ -202,6 +211,9 @@ public sealed class KeyboardHook : IDisposable
         try
         {
             Dispose();
+            _shiftDown = false;
+            _ctrlDown = false;
+            _altDown = false;
             Install();
             Log.Info("KeyboardHook", "reinstalled after commit");
         }
@@ -229,8 +241,7 @@ public sealed class KeyboardHook : IDisposable
                 $"cb vk=0x{vk:X2} sc=0x{sc:X2} up={isUp} fg=0x{fg.ToInt64():X} pid={fgPid}");
         }
         // WPF Keyboard.Modifiers 有 UI 线程亲和 — 专用钩子线程上用原生查询.
-        var shift = (GetAsyncKeyState(0xA0) & 0x8000) != 0
-                 || (GetAsyncKeyState(0xA1) & 0x8000) != 0;
+        var shift = ShiftHeld();
         // Alt 实时状态 — 不依赖 _altDown 标志. 标志会被合成 Alt-up 事件
         // (前台切换后 OS 释放旧前台进程的 Alt) 错位; GetAsyncKeyState 直
         // 读物理状态, 更准.
@@ -240,6 +251,8 @@ public sealed class KeyboardHook : IDisposable
 
         // 修饰键跟踪: Alt (overlay 触发/提交) + quick 修饰键 (一次直达).
         // Alt 三键同时属于两个角色 — 都要更新, 缺一不可.
+        if (vk is 0x10 or 0xA0 or 0xA1) _shiftDown = !isUp;
+        else if (vk is 0x11 or 0xA2 or 0xA3) _ctrlDown = !isUp;
         if (vk == 0x12 || vk == 0xA4 || vk == 0xA5
             || Array.IndexOf(QuickModifierVirtualKeys, vk) >= 0)
         {
@@ -309,8 +322,7 @@ public sealed class KeyboardHook : IDisposable
         // +方向键 的同款语义: 只搬窗口, 不切桌面). 必须排在下面"方向键 =
         // 面板导航"之前 — 面板开着时 Alt 一定按着, 不先拦掉就变成移动选中项
         // 而不是迁移窗口.
-        if (altHeld && !isUp && (vk == 0x25 || vk == 0x27)
-            && CtrlHeld() && ShiftHeld())
+        if (!isUp && (vk == 0x25 || vk == 0x27) && MoveWindowModsHeld())
         {
             var dir = vk == 0x25 ? -1 : 1;
             Log.Info("KeyboardHook", $"virtual desktop move window {(dir < 0 ? "left" : "right")}");
@@ -424,12 +436,27 @@ public sealed class KeyboardHook : IDisposable
         return true;
     }
 
+    /// <summary>迁移窗口热键此刻是否完整按住. 要求前缀比"一次直达"的修饰键
+    /// 更具体 (严格超集) — 否则用户把前缀设成 Alt 时, Alt+←/→ 会被抢走
+    /// (面板开着时那是移动选中项).</summary>
+    private bool MoveWindowModsHeld()
+    {
+        var m = ModMask(MoveWindowModifierVks);
+        if (m == 0) return false;
+        if ((m & ~ModMask(QuickModifierVirtualKeys)) == 0) return false;
+        if ((m & ModAlt) != 0 && !AltHeld()) return false;
+        if ((m & ModCtrl) != 0 && !CtrlHeld()) return false;
+        if ((m & ModShift) != 0 && !ShiftHeld()) return false;
+        if ((m & ModWin) != 0 && !WinHeld()) return false;
+        return true;
+    }
+
     // 修饰键"此刻按着" — LLKHF_ALTDOWN 在 WM_KEYDOWN 上不可靠 (见
     // reference/VirtualDesktopSwitcher/notes/dev.md), 一律现场读 async 状态.
     private static bool KeyHeld(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
     private static bool AltHeld() => KeyHeld(0x12) || KeyHeld(0xA4) || KeyHeld(0xA5);
-    private static bool CtrlHeld() => KeyHeld(0x11) || KeyHeld(0xA2) || KeyHeld(0xA3);
-    private static bool ShiftHeld() => KeyHeld(0x10) || KeyHeld(0xA0) || KeyHeld(0xA1);
+    private bool CtrlHeld() => _ctrlDown || KeyHeld(0x11) || KeyHeld(0xA2) || KeyHeld(0xA3);
+    private bool ShiftHeld() => _shiftDown || KeyHeld(0x10) || KeyHeld(0xA0) || KeyHeld(0xA1);
     private static bool WinHeld() => KeyHeld(0x5B) || KeyHeld(0x5C);
 
     // ---------- 专用泵线程的 message loop P/Invoke (self-contained) ----------

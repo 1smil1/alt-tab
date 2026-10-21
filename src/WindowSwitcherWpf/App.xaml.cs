@@ -141,7 +141,28 @@ public partial class App : Application
             {
                 var id = VirtualDesktop.DesktopIdOfWindow(w.Hwnd);
                 var mark = id == cur ? "CUR" : "   ";
-                Console.WriteLine($"{mark} {id} {w.Title}");
+                Console.WriteLine($"{mark} 0x{w.Hwnd.ToInt64():X} {id} {w.Title}");
+            }
+            Shutdown();
+            return;
+        }
+
+        if (e.Args.Length >= 3 && e.Args[0] == "--vd-move")
+        {
+            // 调试用: 把窗口搬到第 N 个虚拟桌面 (0 基). 用来定位
+            // E_ACCESSDENIED — 是不是窗口所属进程提权/完整性级别的问题.
+            var hwnd = new IntPtr(Convert.ToInt64(e.Args[1].Replace("0x", ""),
+                e.Args[1].StartsWith("0x") ? 16 : 10));
+            var idx = int.Parse(e.Args[2]);
+            var list = VirtualDesktop.List();
+            if (idx < 0 || idx >= list.Count)
+            {
+                Console.WriteLine($"桌面 {idx + 1} 不存在 (共 {list.Count} 个)");
+            }
+            else
+            {
+                var ok = VirtualDesktop.MoveWindowToDesktop(hwnd, list[idx].Id);
+                Console.WriteLine($"move 0x{hwnd.ToInt64():X} → 桌面{idx + 1} ok={ok}");
             }
             Shutdown();
             return;
@@ -443,6 +464,19 @@ public partial class App : Application
         {
             hook.VirtualDesktopModifierVks = Array.Empty<uint>();
             Log.Info("App", $"virtual desktop hotkey '{vdPrefix ?? "<null>"}' — disabled");
+        }
+        // 迁移窗口热键: 前缀 (只修饰键) + ←/→ → 搬到相邻虚拟桌面.
+        var mvPrefix = _controller.Config.MoveWindowHotkey;
+        if (HotkeyParser.TryParseModifiers(mvPrefix, out var mvMods))
+        {
+            hook.MoveWindowModifierVks = mvMods;
+            Log.Info("App", $"move window hotkey '{mvPrefix}' + ←/→ → " +
+                $"vks=[{string.Join(',', mvMods.Select(v => $"0x{v:X2}"))}]");
+        }
+        else
+        {
+            hook.MoveWindowModifierVks = Array.Empty<uint>();
+            Log.Info("App", $"move window hotkey '{mvPrefix ?? "<null>"}' — disabled");
         }
         // 切到窗口后的外框蓝光 (设置保存时同样热生效)
         WindowFlash.Enabled = _controller.Config.SelectionGlow ?? true;
@@ -1355,6 +1389,12 @@ public partial class App : Application
             && !HotkeyParser.TryParseModifiers("Alt+Nope", out _));
 
         // 标签范围默认按虚拟桌面分开 (与原生 Alt+Tab 一致).
+        Check("move-hotkey-default-parses",
+            HotkeyParser.TryParseModifiers("Alt+Ctrl+Shift", out var mvMods)
+            && mvMods.Length >= 2);
+        Check("move-hotkey-empty-disabled",
+            !HotkeyParser.TryParseModifiers("", out _));
+
         Check("tag-scope-default-per-desktop",
             !ConfigStore.DefaultConfig().GlobalTagsAcrossDesktops);
 
