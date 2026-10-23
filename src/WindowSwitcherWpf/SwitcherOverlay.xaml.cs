@@ -236,6 +236,13 @@ public partial class SwitcherOverlay : Window
     // path is SetWindowCompositionAttribute + ACCENT_ACRYLICBLURBEHIND:
     // the desktop behind shows through, heavily blurred, with a light
     // tint (背景颜色透出来, 朦胧度拉满). GradientColor is ABGR.
+    protected override void OnContentRendered(EventArgs e)
+    {
+        base.OnContentRendered(e);
+        WindowSwitcherWpf.Services.Log.Info("Overlay",
+            $"first frame rendered, show→render {_showWatch.ElapsedMilliseconds}ms");
+    }
+
     private void ApplyAcrylic()
     {
         try
@@ -277,6 +284,8 @@ public partial class SwitcherOverlay : Window
     {
         try
         {
+            _showWatch.Restart();
+            if (_idleTrimTimer is { } t && t.IsEnabled) t.Stop();
             _controller.OpenOverlay();
             Rebuild();
             RefreshDesktops();
@@ -305,7 +314,7 @@ public partial class SwitcherOverlay : Window
             // thumbnails, so they get a cloaked restore first.
             Dispatcher.BeginInvoke(new Action(PrepareMinimizedThenRegister),
                 DispatcherPriority.ApplicationIdle);
-            WindowSwitcherWpf.Services.Log.Info("Overlay", $"shown groups={_controller.Groups.Count} hwnd={new System.Windows.Interop.WindowInteropHelper(this).Handle:X}");
+            WindowSwitcherWpf.Services.Log.Info("Overlay", $"shown groups={_controller.Groups.Count} hwnd={new System.Windows.Interop.WindowInteropHelper(this).Handle:X} show={_showWatch.ElapsedMilliseconds}ms");
         }
         catch (Exception ex)
         {
@@ -337,6 +346,12 @@ public partial class SwitcherOverlay : Window
     {
         if (!_isOpen || EditMode) return; // 编辑模式: 松 Alt 不提交
         _thumbTimer.Stop();
+        // 这个窗口马上要被激活. 如果后台 cloak-restore 舞蹈刚把它临时还原,
+        // 绝不能在舞蹈收尾时把它再最小化 — 否则用户就盯着一个"已激活又被
+        // 按下去 + cloak 未解"的白窗口等 ~1s. 豁免它: 舞蹈留下的还原态正
+        // 好就是激活后想要的.
+        var picked = SelectedHwnd;
+        if (picked != IntPtr.Zero) lock (DanceKeepLock) DanceKeepHwnds.Add(picked.ToInt64());
         _controller.Commit();
         UnregisterLiveThumbnails();
         _isOpen = false;
@@ -512,7 +527,35 @@ public partial class SwitcherOverlay : Window
     // Tray-app memory discipline: the overlay just did its bitmap burst;
     // drop visual-cache entries for windows that no longer exist and trim
     // the working set so idle RAM pages out to the pagefile.
+    /// <summary>空闲省内存定时器: 面板关掉 90 秒后才踢内存页. 之前是关掉
+    /// 立刻踢, 结果每次 Alt+Tab 打开都要把整个进程从 pagefile 软缺页调回
+    /// 来, 表现为面板先白屏 ~1s 才出内容. 拖后 + 开面板时取消, 打开路径
+    /// 就不再付这笔缺页钱; 真空闲 90s 内存照样能被系统换出去.</summary>
+    private System.Windows.Threading.DispatcherTimer? _idleTrimTimer;
+
+    private System.Diagnostics.Stopwatch _showWatch = new();
+
     private void EnterIdleMode()
+    {
+        _idleTrimTimer ??= CreateIdleTrimTimer();
+        _idleTrimTimer.Stop();
+        _idleTrimTimer.Start();
+    }
+
+    private System.Windows.Threading.DispatcherTimer CreateIdleTrimTimer()
+    {
+        var t = new System.Windows.Threading.DispatcherTimer
+        { Interval = TimeSpan.FromSeconds(90) };
+        t.Tick += (_, _) =>
+        {
+            t.Stop();
+            if (_isOpen) return;
+            DoIdleTrim();
+        };
+        return t;
+    }
+
+    private void DoIdleTrim()
     {
         var dead = new List<IntPtr>();
         foreach (var kv in s_visualCache)
@@ -530,7 +573,7 @@ public partial class SwitcherOverlay : Window
         GC.WaitForPendingFinalizers();
         GC.Collect();
         NativeMethods.SetProcessWorkingSetSize(new IntPtr(-1), new IntPtr(-1), new IntPtr(-1));
-        WindowSwitcherWpf.Services.Log.Info("Overlay", "idle: cache trimmed, working set requested");
+        WindowSwitcherWpf.Services.Log.Info("Overlay", "idle(90s): cache trimmed, working set requested");
     }
 
     public void SelectDigit(int digit)
@@ -1022,6 +1065,7 @@ public partial class SwitcherOverlay : Window
         RegisterLiveThumbnails(); // instant live previews — do NOT wait for the dance
         if (System.Threading.Interlocked.CompareExchange(
                 ref _danceRunning, 1, 0) == 1) return;
+        lock (DanceKeepLock) DanceKeepHwnds.Clear();
         // Windows we have danced before keep their restored-size DWM
         // surface while minimized — only never-danced ones need the dance.
         var minimized = _windows.Where(w => NativeMethods.IsIconic(w.Hwnd)
@@ -1065,7 +1109,17 @@ public partial class SwitcherOverlay : Window
                 // the overlay closed mid-dance. 只还原**我们真的 cloak 成功**
                 // 的那些 — 对 cloak 被拒 (提权窗口) 的窗强制写 0 会把别的
                 // 虚拟桌面上的窗口拉回当前桌面.
-                foreach (var h in restored)
+                var fg = NativeMethods.GetForegroundWindow();
+                List<IntPtr> keep;
+                lock (DanceKeepLock)
+                {
+                    keep = restored.Where(h => DanceKeepHwnds.Contains(h.ToInt64()) || h == fg)
+                        .ToList();
+                }
+                foreach (var h in keep)
+                    WindowSwitcherWpf.Services.Log.Info("Overlay",
+                        $"dance: keep restored (picked/foreground) hwnd=0x{h.ToInt64():X}");
+                foreach (var h in restored.Except(keep))
                     NativeMethods.ShowWindow(h, NativeMethods.SW_SHOWMINNOACTIVE);
                 foreach (var h in restored)
                 {
@@ -1133,6 +1187,11 @@ public partial class SwitcherOverlay : Window
     }
 
     private int _danceRunning;
+
+    /// <summary>本次舞蹈不许再最小化的窗口 (用户已选中激活的).
+    /// 开新舞蹈时清空.</summary>
+    private static readonly HashSet<long> DanceKeepHwnds = new();
+    private static readonly object DanceKeepLock = new();
 
     private void RegisterLiveThumbnails()
     {

@@ -218,6 +218,7 @@ public static class NativeMethods
     }
 
     public const int DWMWA_CLOAKED = 14;
+    public const int DWMWA_BORDER_COLOR = 34;
     public const int DWMWA_CLOAK = 13;
     public const int DWMWA_HAS_ICONIC_BITMAP = 10;
 

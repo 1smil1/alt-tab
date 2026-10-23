@@ -1,94 +1,76 @@
 using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using WindowSwitcherWpf.Services;
 using static WindowSwitcherWpf.Interop.NativeMethods;
-// NB: Interop 命名空间里也有名为 Rectangle 的 P/Invoke 结构体, 会盖掉
-// System.Windows.Shapes.Rectangle — 那处必须写全名.
 
 namespace WindowSwitcherWpf.Interop;
 
 /// <summary>
-/// 切到某个窗口时, 在**那个窗口的外框**上闪一圈暖金虚线然后马上消失
-/// (用户: Alt+Tab 选中一个最小化的标签, 它恢复到桌面那一刻, 页面边框
-/// 画一圈边框马上消失).
+/// 切到某个窗口时, 在那个窗口外框闪一圈暖金虚线流光然后淡出
+/// (用户的美化重点效果: 虚线 + 圆头 + 流动 + 渐隐).
 ///
-/// 与 overlay 卡上的选中框完全无关 —— 这里画在真实桌面上的目标窗口
-/// 外围, 激活成功后才闪 (失败不闪).
+/// 为什么不用 WPF 窗口画: 2026-10-23 这台机器 (Win11 22631) 上, 全屏级
+/// WPF 分层窗口上屏前会被 DWM 合成白色矩形约 1s — 预热/屏外预渲染/去
+/// DropShadowEffect 都救不回来, 表现为"Alt+Tab 先白屏 1s 才出内容".
+/// 原生 DWMWA_BORDER_COLOR 试过: hr=0 但 1px 边框在最大化的窗口上看不见.
 ///
-/// 实现: 一个**复用**的无边框 / 透明 / 置顶 / 点击穿透 WPF 窗口. 每次闪
-/// 只是改位置尺寸 + 重启动画, 结束隐藏 (不是 Close): AllowsTransparency
-/// 窗口建一次 ~100ms+, 每次重建的话边框会明显滞后于窗口切换 — 用户反馈
-/// "alt tab 后有延迟才出现".
+/// 所以这里用纯 Win32 分层窗口 + GDI+ UpdateLayeredWindow: 窗口类背景刷
+/// 为 NULL, 像素先画进位图再一次性上屏, DWM 从头到尾只看得到画好的
+/// 像素, 结构上没有"未渲染首帧"可白. 虚线笔/圆头/动画偏移全部照旧.
 /// </summary>
 public static class WindowFlash
 {
     /// <summary>config SelectionGlow (null = 默认开). 由 App 启动时写入.</summary>
     public static bool Enabled { get; set; } = true;
 
-    // 暖金 (#FFB454) — 比冷蓝柔和, 在深色 UI 上不刺眼, 在浅色窗口上也不突兀.
-    private static readonly Color GlowColor = Color.FromRgb(0xFF, 0xB4, 0x54);
+    // 暖金 #FFB454 — 比冷蓝柔和, 深浅色 UI 都不刺眼.
+    private static readonly Color Glow = Color.FromArgb(255, 0xFF, 0xB4, 0x54);
 
-    private static System.Windows.Window? _win;
-    private static Border? _host;
-    private static System.Windows.Shapes.Rectangle? _rect;
-    private static System.Windows.Threading.DispatcherTimer? _timer;
+    private const int FrameMs = 33;         // ~30fps 的流光动画
+    private const int TotalMs = 900;        // 整段闪烁时长
+    private const int MarginPx = 12;        // 线外留白 (晕圈空间)
+    private const float LineWidth = 2.5f;
+    private const float HaloWidth = 8f;
+    private const float DashAdvance = 3.4f; // 每帧虚线流动步进 (px)
+
+    private static IntPtr _hwnd;
+    private static DispatcherTimer? _timer;
+    private static DateTime _started;
+    private static float _dashOffset;
+    private static RECT _target;            // 物理像素, 含 MarginPx 外扩
+    private static bool _ulwFailedLogged;
+
+    // ---------- 公开入口 ----------
 
     public static void Flash(IntPtr hwnd)
     {
         if (!Enabled || hwnd == IntPtr.Zero) return;
-        var app = Application.Current;
-        if (app is null) return;
-        // 激活是同步的 (SetForegroundWindow + 重试), 拿到 rect 要等目标窗口
-        // 已经摆好位置, 所以推到 dispatcher 让它排在激活之后.
-        app.Dispatcher.BeginInvoke(new Action(() => Run(hwnd)));
-    }
-
-    private static void Run(IntPtr hwnd)
-    {
         try
         {
-            // 真实边框: 优先 DWM 的 EXTENDED_FRAME_BOUNDS (去掉最大化那圈不可见
-            // resize border), 拿不到再退 GetWindowRect.
+            // 目标窗口真实外框 (物理像素): 优先 DWM 扩展边框, 退 GetWindowRect.
             var hr = DwmGetWindowAttributeRect(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
                 out var r, Marshal.SizeOf<RECT>());
             if (hr != 0 && !GetWindowRect(hwnd, out r)) return;
+            if (r.Right - r.Left <= 0 || r.Bottom - r.Top <= 0) return;
 
-            // 再夹到所在显示器工作区 — 某些全屏窗口的 rect 仍会越出屏幕,
-            // 描边画出去就等于看不见.
-            var mi = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-            if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), ref mi))
-            {
-                r.Left = Math.Max(r.Left, mi.rcWork.Left);
-                r.Top = Math.Max(r.Top, mi.rcWork.Top);
-                r.Right = Math.Min(r.Right, mi.rcWork.Right);
-                r.Bottom = Math.Min(r.Bottom, mi.rcWork.Bottom);
-            }
+            _target.Left = r.Left - MarginPx;
+            _target.Top = r.Top - MarginPx;
+            _target.Right = r.Right + MarginPx;
+            _target.Bottom = r.Bottom + MarginPx;
 
-            var pw = r.Right - r.Left;
-            var ph = r.Bottom - r.Top;
-            if (pw <= 0 || ph <= 0) return;
-
-            // 摆位置用 SetWindowPos (物理像素), 不用 WPF 的 Left/Top/DIP:
-            // WPF 窗口在多屏不同缩放下解释 Left/Top 的 DPI 上下文不稳定
-            // (刚创建时常按主屏 DPI), 副屏就会整体偏移, 甚至跑到屏幕 1.
-            // SetWindowPos 和 GetWindowRect 同一坐标系, 一次到位.
-            var win = EnsureWindow();
-            if (win is null) return;
-            if (!win.IsVisible) win.Show();
-            var hwndFlash = new System.Windows.Interop.WindowInteropHelper(win).Handle;
-            if (hwndFlash == IntPtr.Zero) return;
-            if (!SetWindowPos(hwndFlash, HWND_TOPMOST, r.Left, r.Top, pw, ph,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW))
-                Log.Warn("Flash", $"SetWindowPos failed err={Marshal.GetLastWin32Error()}");
-
-            Start();
-
+            if (_hwnd == IntPtr.Zero && !CreateLayeredWindow()) return;
+            ShowWindow(_hwnd, 8); // SW_SHOWNA — ULW 不会唤醒隐藏的窗口
+            _started = DateTime.UtcNow;
+            _dashOffset = 0;
+            _timer ??= NewTimer();
+            _timer.Stop();
+            _timer.Start();
+            RenderFrame(); // 首帧立即上屏, 不等第一个 tick
             Log.Info("Flash",
-                $"window glow 0x{hwnd.ToInt64():X} dwm={hr} px=({r.Left},{r.Top},{pw}x{ph})");
+                $"window glow(dash) 0x{hwnd.ToInt64():X} px=({_target.Left},{_target.Top},{_target.Right - _target.Left}x{_target.Bottom - _target.Top})");
         }
         catch (Exception ex)
         {
@@ -96,124 +78,215 @@ public static class WindowFlash
         }
     }
 
-    private static System.Windows.Window? EnsureWindow()
+    // ---------- 帧渲染: GDI+ 画虚线, UpdateLayeredWindow 上屏 ----------
+
+    private static DispatcherTimer NewTimer()
     {
-        if (_win is not null) return _win;
-
-        // NB: Interop 命名空间里有个 P/Invoke 的 Rectangle 结构体, 会盖掉
-        // System.Windows.Shapes.Rectangle — 这里必须写全名.
-        var rect = new System.Windows.Shapes.Rectangle
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(FrameMs) };
+        t.Tick += (_, _) =>
         {
-            Stroke = new SolidColorBrush(GlowColor),
-            StrokeThickness = 2.5,
-            // 虚线 + 圆头: 比实线柔和, 一闪而过时也不刺眼
-            StrokeDashArray = new DoubleCollection { 16, 10 },
-            StrokeDashCap = PenLineCap.Round,
-            StrokeEndLineCap = PenLineCap.Round,
-            RadiusX = 8,
-            RadiusY = 8,
-            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            var elapsed = (int)(DateTime.UtcNow - _started).TotalMilliseconds;
+            if (elapsed >= TotalMs)
             {
-                Color = GlowColor,
-                BlurRadius = 20,
-                ShadowDepth = 0,
-                Opacity = 0.7,
-            },
-            // 描边画在内缩的矩形上, 让线正好压在窗口边框上而不是被裁掉.
-            Margin = new Thickness(2),
+                t.Stop();
+                ShowWindow(_hwnd, 0); // SW_HIDE
+                return;
+            }
+            _dashOffset += DashAdvance;
+            RenderFrame();
         };
-        var host = new Border
-        {
-            Background = Brushes.Transparent,
-            Child = rect,
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            RenderTransform = new ScaleTransform(1.03, 1.03),
-        };
-        var win = new System.Windows.Window
-        {
-            WindowStyle = WindowStyle.None,
-            ResizeMode = ResizeMode.NoResize,
-            AllowsTransparency = true,
-            Background = Brushes.Transparent,
-            Topmost = true,
-            ShowActivated = false,
-            ShowInTaskbar = false,
-            IsHitTestVisible = false,
-            Content = host,
-            // 注意: 不透明度只作用在 host 上 (动画对象). 设到窗口上会把
-            // 所有内容一起隐藏 — 之前就是这里写的 0, 导致复用后永远看不见.
-            Opacity = 1,
-        };
-
-        var timer = new System.Windows.Threading.DispatcherTimer
-        {
-            // 兜底: 动画万一没跑完 (窗口被挡/系统繁忙) 也一定收掉
-            Interval = TimeSpan.FromMilliseconds(900),
-        };
-        timer.Tick += (_, _) =>
-        {
-            timer.Stop();
-            if (_win is not null) _win.Hide();
-        };
-
-        _rect = rect;
-        _host = host;
-        _win = win;
-        _timer = timer;
-        return win;
+        return t;
     }
 
-    private static void Start()
+    private static void RenderFrame()
     {
-        if (_win is null || _host is null || _rect is null || _timer is null) return;
-        var win = _win;
-        var host = _host;
-        var rect = _rect;
+        var elapsed = (int)(DateTime.UtcNow - _started).TotalMilliseconds;
+        // 前 40% 全亮, 之后平滑淡出.
+        var alpha = elapsed < TotalMs * 0.4
+            ? 1.0
+            : 1.0 - (elapsed - TotalMs * 0.4) / (TotalMs * 0.6);
+        if (alpha < 0) alpha = 0;
 
-        // 清掉上一轮的残留动画 (复用窗口的关键), 否则 Fade 会被冻在 Opacity=0.
-        host.BeginAnimation(System.Windows.UIElement.OpacityProperty, null);
-        rect.BeginAnimation(System.Windows.Shapes.Shape.StrokeDashOffsetProperty, null);
-        host.Opacity = 1;
-
-        // 动画不等首次渲染 (ContentRendered) — 那会白等一帧, 正是用户看到的
-        // "延迟才出现". 直接起, Show() 之后的第一帧就在动.
-        var dur = TimeSpan.FromMilliseconds(750);
-
-        // 1) 虚线流动: dash offset 一直走到淡出结束
-        var flow = new DoubleAnimation(0, -52, TimeSpan.FromMilliseconds(900))
+        var w = _target.Right - _target.Left;
+        var h = _target.Bottom - _target.Top;
+        using var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(bmp))
         {
-            RepeatBehavior = RepeatBehavior.Forever,
-        };
-        rect.BeginAnimation(System.Windows.Shapes.Shape.StrokeDashOffsetProperty, flow);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using var path = RoundedRectPath(w, h);
+            // 晕圈: 宽的半透明虚线垫底, 实线压上面 — 和旧 WPF 版的双层观感一致.
+            var haloA = (int)(90 * alpha);
+            var lineA = (int)(255 * alpha);
+            using var halo = new Pen(Color.FromArgb(haloA, Glow), HaloWidth)
+            {
+                DashStyle = DashStyle.Dash,
+                DashPattern = new float[] { 16f, 10f },
+                DashCap = DashCap.Round,
+                DashOffset = _dashOffset * 0.6f,
+            };
+            using var line = new Pen(Color.FromArgb(lineA, Glow), LineWidth)
+            {
+                DashStyle = DashStyle.Dash,
+                DashPattern = new float[] { 16f, 10f },
+                DashCap = DashCap.Round,
+                DashOffset = _dashOffset,
+            };
+            g.DrawPath(halo, path);
+            g.DrawPath(line, path);
+        }
 
-        // 2) 轻微回弹: 1.03 -> 1.0, 让"贴上来"的感觉更实
-        var pop = new DoubleAnimation(1.0, dur)
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.HoldEnd,
-        };
-        var st = (ScaleTransform)host.RenderTransform;
-        st.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleXProperty, pop);
-        st.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleYProperty, pop);
+        ULW(bmp, w, h);
+    }
 
-        // 3) 渐变离开: 前 35% 保持全亮, 之后平滑淡出
-        var fade = new DoubleAnimationUsingKeyFrames
-        {
-            Duration = dur,
-            FillBehavior = FillBehavior.HoldEnd,
-        };
-        fade.KeyFrames.Add(new LinearDoubleKeyFrame(1, KeyTime.FromPercent(0.35)));
-        fade.KeyFrames.Add(new EasingDoubleKeyFrame(0, KeyTime.FromPercent(1))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn },
-        });
-        fade.Completed += (_, _) =>
-        {
-            try { win.Hide(); } catch { }
-        };
-        host.BeginAnimation(System.Windows.UIElement.OpacityProperty, fade);
+    private static GraphicsPath RoundedRectPath(int w, int h)
+    {
+        var p = new GraphicsPath();
+        const float rad = 8f, inset = 3f;
+        var x = inset;
+        var y = inset;
+        var cw = w - inset * 2;
+        var ch = h - inset * 2;
+        p.AddArc(x, y, rad * 2, rad * 2, 180, 90);
+        p.AddArc(x + cw - rad * 2, y, rad * 2, rad * 2, 270, 90);
+        p.AddArc(x + cw - rad * 2, y + ch - rad * 2, rad * 2, rad * 2, 0, 90);
+        p.AddArc(x, y + ch - rad * 2, rad * 2, rad * 2, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
 
-        _timer.Stop();
-        _timer.Start();
+    /// <summary>ULW 要预乘 alpha (RGB 分量已乘 alpha), 而 GDI+ 位图是直通
+    /// alpha. 不预乘时虚线边缘会出白花, 部分 DWM 状态下整窗直接不显示.
+    /// 虚线以外的区域 alpha=0, 跳过 — 真正要处理的只有线条周围的 AA 像素.</summary>
+    private static void Premultiply(Bitmap bmp)
+    {
+        var rect = new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height);
+        var data = bmp.LockBits(rect,
+            System.Drawing.Imaging.ImageLockMode.ReadWrite,
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            unsafe
+            {
+                var row = (byte*)data.Scan0;
+                for (var y = 0; y < data.Height; y++, row += data.Stride)
+                {
+                    var px = row;
+                    for (var x = 0; x < data.Width; x++, px += 4)
+                    {
+                        var a = px[3];
+                        if (a == 255) continue;
+                        px[0] = (byte)(px[0] * a >> 8);
+                        px[1] = (byte)(px[1] * a >> 8);
+                        px[2] = (byte)(px[2] * a >> 8);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            bmp.UnlockBits(data);
+        }
+    }
+
+    /// <summary>位图交给窗口: 一次调用同时定位置/尺寸/像素.</summary>
+    private static void ULW(Bitmap bmp, int w, int h)
+    {
+        Premultiply(bmp);
+        var hdcScreen = GetDC(IntPtr.Zero);
+        var hdcMem = CreateCompatibleDC(hdcScreen);
+        var hBmp = bmp.GetHbitmap(Color.FromArgb(0));
+        var old = SelectObject(hdcMem, hBmp);
+        try
+        {
+            var dst = new POINT { x = _target.Left, y = _target.Top };
+            var size = new SIZE { cx = w, cy = h };
+            var src = new POINT { x = 0, y = 0 };
+            var blend = new BLENDFUNCTION
+            {
+                BlendOp = 0, // AC_SRC_OVER
+                BlendFlags = 0,
+                SourceConstantAlpha = 255,
+                AlphaFormat = 1, // AC_SRC_ALPHA — 用位图自带逐像素 alpha
+            };
+            if (!UpdateLayeredWindow(_hwnd, hdcScreen, ref dst, ref size,
+                    hdcMem, ref src, 0, ref blend, 2 /* ULW_ALPHA */)
+                && !_ulwFailedLogged)
+            {
+                _ulwFailedLogged = true;
+                Log.Warn("Flash",
+                    $"UpdateLayeredWindow failed err={Marshal.GetLastWin32Error()} size={w}x{h}");
+            }
+        }
+        finally
+        {
+            _ = SelectObject(hdcMem, old);
+            _ = DeleteObject(hBmp);
+            _ = DeleteDC(hdcMem);
+            _ = ReleaseDC(IntPtr.Zero, hdcScreen);
+        }
+    }
+
+    // ---------- Win32 窗口创建 ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SIZE { public int cx, cy; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BLENDFUNCTION
+    {
+        public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat;
+    }
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr obj);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+
+    [DllImport("user32.dll")]
+    private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst,
+        ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc,
+        uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowExW(uint exStyle, string className,
+        string windowName, uint style, int x, int y, int w, int h,
+        IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+
+    private static bool CreateLayeredWindow()
+    {
+        // WS_EX_LAYERED 分层 | TRANSPARENT 点击穿透 | TOPMOST 压顶 |
+        // NOACTIVATE 不抢焦点 | TOOLWINDOW 不进 Alt+Tab.
+        // 窗口类用系统现成的 STATIC — 自己 RegisterClassExW 在这台机器上
+        // 稳定回 err=87 (结构体封送坑), 没必要跟它纠缠; ULW 不需要消息循环.
+        const uint WS_EX_LAYERED = 0x80000, WS_EX_TRANSPARENT = 0x20,
+            WS_EX_TOPMOST = 0x8, WS_EX_NOACTIVATE = 0x08000000,
+            WS_EX_TOOLWINDOW = 0x80;
+        const uint WS_POPUP = 0x80000000;
+
+        _hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
+            WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            "STATIC", "", WS_POPUP,
+            0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        if (_hwnd == IntPtr.Zero)
+        {
+            Log.Warn("Flash", $"CreateWindowExW failed err={Marshal.GetLastWin32Error()}");
+            return false;
+        }
+        Log.Info("Flash", $"glow window created hwnd=0x{_hwnd.ToInt64():X}");
+        return true;
     }
 }
