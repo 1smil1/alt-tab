@@ -156,8 +156,20 @@ public sealed class WindowEnumerator
         if ((exStyle & WS_EX_NOACTIVATE) != 0) return false;
         // Real taskbar apps can be resized (WS_THICKFRAME). Tray-only
         // indicators (ImTip) and pure popups (notifications) cannot.
+        //
+        // 但 Chromium 家族 (Chrome/Edge/Brave) **最大化时会剥掉**
+        // WS_THICKFRAME 和 WS_CAPTION — 最大化后 resize 边框本来就不可见,
+        // 留着只会在屏幕边缘留痕. 结果最大化的 Chrome 整窗被这条规则踢掉,
+        // 面板里连标签都不出现 (用户 2026-10-23 报: 最大化后 Alt+Tab 看不到).
+        // 它的 DWMWA_HAS_ICONIC_BITMAP 又返回 E_INVALIDARG
+        // (WS_EX_NOREDIRECTIONBITMAP), 走不到上面那条更准的 DWM 路径.
+        //
+        // 兜底: 缺 THICKFRAME 时看是不是**最大化状态** (WS_MAXIMIZE).
+        // 托盘图标 / 菜单 / 通知这类真弹出窗口永远不会是最大化状态, 所以
+        // 不会放进垃圾窗口.
         var style = GetWindowLongPtr(hwnd, GWL_STYLE);
-        if ((style & WS_THICKFRAME) == 0) return false;
+        if ((style & WS_THICKFRAME) == 0
+            && (style & WS_MAXIMIZE) == 0) return false;
         return true;
     }
 
@@ -189,7 +201,8 @@ public sealed class WindowEnumerator
         if ((exStyle & WS_EX_TOOLWINDOW) != 0) return "WS_EX_TOOLWINDOW";
         if ((exStyle & WS_EX_NOACTIVATE) != 0) return "WS_EX_NOACTIVATE";
         var style = GetWindowLongPtr(hwnd, GWL_STYLE);
-        if ((style & WS_THICKFRAME) == 0) return "no-thickframe";
+        if ((style & WS_THICKFRAME) == 0
+            && (style & WS_MAXIMIZE) == 0) return "no-thickframe";
         return "ok";
     }
 

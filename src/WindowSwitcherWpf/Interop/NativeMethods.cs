@@ -76,6 +76,7 @@ public static class NativeMethods
     public const int WS_ICONIC = 0x20000000;
     public const int WS_CAPTION = 0x00C00000; // WS_CAPTION | WS_SYSMENU (caption present)
     public const int WS_THICKFRAME = 0x00040000;
+    public const int WS_MAXIMIZE = 0x01000000; // 窗口处于最大化状态
     public const int WS_MINIMIZEBOX = 0x00020000;
     public const int WS_SYSMENU_FLAG = 0x00080000;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
