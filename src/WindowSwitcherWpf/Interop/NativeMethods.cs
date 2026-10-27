@@ -490,6 +490,36 @@ public static class NativeMethods
     public static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFO lpmi);
 
     public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    /// <summary>系统级提交内存快照 (OOM 诊断用): commitLimit = total,
+    /// commitFree = avail. 单位与 Win32 一致 (KB 归一后是 B).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    /// <summary>一行式提交内存快照, OOM 时打日志用.</summary>
+    public static string MemorySnapshot()
+    {
+        var st = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+        if (!GlobalMemoryStatusEx(ref st))
+            return "mem=unavailable";
+        return $"memLoad={st.dwMemoryLoad}% commitFree={st.ullAvailPageFile / 1024 / 1024}GB"
+             + $"/{st.ullTotalPageFile / 1024 / 1024}GB physFree={st.ullAvailPhys / 1024 / 1024}GB";
+    }
 }
 
 [Flags]

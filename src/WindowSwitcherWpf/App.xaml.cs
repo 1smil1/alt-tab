@@ -19,6 +19,7 @@ public partial class App : Application
     private DesktopFocusTracker? _focusTracker;
     private MouseHook? _mouse;
     private System.Windows.Threading.DispatcherTimer? _watchdog;
+    private int _watchdogTicks;
     private OrderStore? _orderStore;
     private WindowGroupingService? _grouping;
     private SwitcherController? _controller;
@@ -320,6 +321,19 @@ public partial class App : Application
             var kbAlive = _keyboard?.IsPumpAlive ?? false;
             var msAlive = _mouse?.IsPumpAlive ?? false;
             Log.Info("Watchdog", $"tick pump(kbd)={kbAlive} pump(mouse)={msAlive}");
+            // 每 ~15min 记一次内存水位: OOM 事后只能靠这些曲线倒推是谁
+            // 涨上来的 (进程私有 vs 系统整体 commit).
+            if (++_watchdogTicks % 450 == 0)
+            {
+                try
+                {
+                    Log.Info("Watchdog",
+                        $"mem private={Environment.WorkingSet / 1024 / 1024}MB"
+                        + $" gc={GC.GetTotalMemory(false) / 1024 / 1024}MB"
+                        + $" {Interop.NativeMethods.MemorySnapshot()}");
+                }
+                catch { }
+            }
             if (!kbAlive && _keyboard is not null)
             {
                 try

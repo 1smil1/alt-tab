@@ -318,6 +318,37 @@ public partial class SwitcherOverlay : Window
         }
         catch (Exception ex)
         {
+            if (ex is OutOfMemoryException)
+            {
+                // OOM 全都在 WPF 内部 (InsertEntry/UpdateLayout), 面板自身
+                // 逻辑没问题 — 实测是瞬时系统提交内存耗尽 (2026-09-21 /
+                // 2026-10-27 两次, 前后 19s 同一代码还能正常开面板). 先把
+                // 现场 (系统 commit + 进程用量) 落日志, 再回收后试一次.
+                var priv = System.Diagnostics.Process.GetCurrentProcess();
+                WindowSwitcherWpf.Services.Log.Error("Overlay.ShowAndFocus",
+                    $"OOM snapshot: {Interop.NativeMethods.MemorySnapshot()} "
+                    + $"private={priv.PrivateMemorySize64 / 1024 / 1024}MB "
+                    + $"gcHeap={GC.GetTotalMemory(false) / 1024 / 1024}MB");
+                try
+                {
+                    GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+                    GC.WaitForPendingFinalizers();
+                    NativeMethods.SetProcessWorkingSetSize(
+                        System.Diagnostics.Process.GetCurrentProcess().Handle, -1, -1);
+                    _showWatch.Restart();
+                    Rebuild();
+                    Show();
+                    _isOpen = true;
+                    _thumbTimer.Start();
+                    WindowSwitcherWpf.Services.Log.Info("Overlay.ShowAndFocus",
+                        $"OOM retry ok show={_showWatch.ElapsedMilliseconds}ms");
+                    return;
+                }
+                catch (Exception retry)
+                {
+                    ex = retry;
+                }
+            }
             WindowSwitcherWpf.Services.Log.Exception("Overlay.ShowAndFocus", ex);
             ShowError("ShowAndFocus 失败", ex);
         }
